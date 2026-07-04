@@ -61,6 +61,11 @@ struct sd_softc {
 #define	SDF_DYING	0x40		/* dying, when deactivated */
 #define	SDF_THIN	0x01		/* disk is thin provisioned */
 	struct scsi_link	*sc_link; /* contains our targ, lun, etc. */
+	u_int32_t		zone_mode;
+	u_int64_t		zone_flags;
+	u_int64_t		zone_optimal_seq_zones;
+	u_int64_t		zone_optimal_nonseq_zones;
+	u_int64_t		zone_max_seq_zones;
 	struct disk_parms {
 		u_int32_t	heads;		/* number of heads */
 		u_int32_t	cyls;		/* number of cylinders */
