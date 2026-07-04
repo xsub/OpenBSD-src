@@ -1560,6 +1560,7 @@
 ./usr/share/man/man4/ddb.4
 ./usr/share/man/man4/de.4
 ./usr/share/man/man4/diskmap.4
+./usr/share/man/man4/dkzone.4
 ./usr/share/man/man4/divert.4
 ./usr/share/man/man4/drm.4
 ./usr/share/man/man4/dsxrtc.4
