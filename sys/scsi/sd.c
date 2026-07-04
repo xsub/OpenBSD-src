@@ -93,6 +93,8 @@ int	sd_thin_pages(struct sd_softc *, int);
 int	sd_vpd_block_limits(struct sd_softc *, int);
 int	sd_vpd_thin(struct sd_softc *, int);
 int	sd_thin_params(struct sd_softc *, int);
+int	sd_vpd_zoned(struct sd_softc *, int);
+int	sd_zoned_params(struct sd_softc *, int);
 int	sd_get_parms(struct sd_softc *, int);
 int	sd_flush(struct sd_softc *, int);
 
@@ -100,6 +102,10 @@ void	viscpy(u_char *, u_char *, int);
 
 int	sd_ioctl_inquiry(struct sd_softc *, struct dk_inquiry *);
 int	sd_ioctl_cache(struct sd_softc *, long, struct dk_cache *);
+int	sd_ioctl_zoneinfo(struct sd_softc *, struct dk_zone_info *);
+int	sd_ioctl_zonereport(struct sd_softc *, struct dk_zone_report *);
+int	sd_zbc_report_zones(struct sd_softc *, u_int64_t, u_int8_t, void *,
+	    u_int32_t, u_int32_t *, int);
 
 int	sd_cmd_rw6(struct scsi_generic *, int, u_int64_t, u_int32_t);
 int	sd_cmd_rw10(struct scsi_generic *, int, u_int64_t, u_int32_t);
@@ -129,6 +135,8 @@ const struct scsi_inquiry_pattern sd_patterns[] = {
 	{T_OPTICAL, T_FIXED,
 	 "",         "",                 ""},
 	{T_OPTICAL, T_REMOV,
+	 "",         "",                 ""},
+	{T_ZBC, T_FIXED,
 	 "",         "",                 ""},
 };
 
@@ -215,6 +223,8 @@ sdattach(struct device *parent, struct device *self, void *aux)
 			sortby = BUFQ_FIFO;
 			printf(", thin");
 		}
+		if (sc->zone_mode != DK_ZONE_MODE_NONE)
+			printf(", zoned");
 		if (ISSET(link->flags, SDEV_READONLY))
 			printf(", readonly");
 		printf("\n");
@@ -963,8 +973,11 @@ sdioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 		goto exit;
 
 	case DIOCGZONEINFO:
+		error = sd_ioctl_zoneinfo(sc, (struct dk_zone_info *)addr);
+		goto exit;
+
 	case DIOCGZONEREPORT:
-		error = EOPNOTSUPP;
+		error = sd_ioctl_zonereport(sc, (struct dk_zone_report *)addr);
 		goto exit;
 
 	default:
@@ -1088,6 +1101,247 @@ sd_ioctl_cache(struct sd_softc *sc, long cmd, struct dk_cache *dkc)
 done:
 	dma_free(buf, sizeof(*buf));
 	return rv;
+}
+
+int
+sd_ioctl_zoneinfo(struct sd_softc *sc, struct dk_zone_info *dzi)
+{
+	if (ISSET(sc->flags, SDF_DYING))
+		return ENXIO;
+
+	bzero(dzi, sizeof(*dzi));
+	dzi->dzi_version = DK_ZONE_VERSION;
+	dzi->dzi_zone_mode = sc->zone_mode;
+	dzi->dzi_flags = sc->zone_flags;
+	dzi->dzi_optimal_open_zones = sc->zone_optimal_seq_zones;
+	dzi->dzi_optimal_nonseq_zones = sc->zone_optimal_nonseq_zones;
+	dzi->dzi_max_seq_zones = sc->zone_max_seq_zones;
+
+	return 0;
+}
+
+static int
+sd_zbc_report_option(u_int32_t option, u_int8_t *zbc_option)
+{
+	switch (option) {
+	case DK_ZONE_REP_ALL:
+		*zbc_option = ZBC_IN_REP_ALL;
+		break;
+	case DK_ZONE_REP_EMPTY:
+		*zbc_option = ZBC_IN_REP_EMPTY;
+		break;
+	case DK_ZONE_REP_IMP_OPEN:
+		*zbc_option = ZBC_IN_REP_IMP_OPEN;
+		break;
+	case DK_ZONE_REP_EXP_OPEN:
+		*zbc_option = ZBC_IN_REP_EXP_OPEN;
+		break;
+	case DK_ZONE_REP_CLOSED:
+		*zbc_option = ZBC_IN_REP_CLOSED;
+		break;
+	case DK_ZONE_REP_FULL:
+		*zbc_option = ZBC_IN_REP_FULL;
+		break;
+	case DK_ZONE_REP_READONLY:
+		*zbc_option = ZBC_IN_REP_READONLY;
+		break;
+	case DK_ZONE_REP_OFFLINE:
+		*zbc_option = ZBC_IN_REP_OFFLINE;
+		break;
+	case DK_ZONE_REP_RESET:
+		*zbc_option = ZBC_IN_REP_RESET;
+		break;
+	case DK_ZONE_REP_NON_SEQ:
+		*zbc_option = ZBC_IN_REP_NON_SEQ;
+		break;
+	case DK_ZONE_REP_NON_WP:
+		*zbc_option = ZBC_IN_REP_NON_WP;
+		break;
+	default:
+		return EINVAL;
+	}
+
+	return 0;
+}
+
+static u_int32_t
+sd_zone_type(u_int8_t type)
+{
+	switch (type & SRZ_TYPE_MASK) {
+	case SRZ_TYPE_CONVENTIONAL:
+		return DK_ZONE_TYPE_CONVENTIONAL;
+	case SRZ_TYPE_SEQ_REQUIRED:
+		return DK_ZONE_TYPE_SEQ_REQUIRED;
+	case SRZ_TYPE_SEQ_PREFERRED:
+		return DK_ZONE_TYPE_SEQ_PREFERRED;
+	default:
+		return DK_ZONE_TYPE_UNKNOWN;
+	}
+}
+
+static u_int32_t
+sd_zone_condition(u_int8_t condition)
+{
+	switch (condition) {
+	case (SRZ_ZONE_COND_NOT_WP >> SRZ_ZONE_COND_SHIFT):
+		return DK_ZONE_COND_NOT_WP;
+	case (SRZ_ZONE_COND_EMPTY >> SRZ_ZONE_COND_SHIFT):
+		return DK_ZONE_COND_EMPTY;
+	case (SRZ_ZONE_COND_IMP_OPEN >> SRZ_ZONE_COND_SHIFT):
+		return DK_ZONE_COND_IMPLICIT_OPEN;
+	case (SRZ_ZONE_COND_EXP_OPEN >> SRZ_ZONE_COND_SHIFT):
+		return DK_ZONE_COND_EXPLICIT_OPEN;
+	case (SRZ_ZONE_COND_CLOSED >> SRZ_ZONE_COND_SHIFT):
+		return DK_ZONE_COND_CLOSED;
+	case (SRZ_ZONE_COND_READONLY >> SRZ_ZONE_COND_SHIFT):
+		return DK_ZONE_COND_READONLY;
+	case (SRZ_ZONE_COND_FULL >> SRZ_ZONE_COND_SHIFT):
+		return DK_ZONE_COND_FULL;
+	case (SRZ_ZONE_COND_OFFLINE >> SRZ_ZONE_COND_SHIFT):
+		return DK_ZONE_COND_OFFLINE;
+	default:
+		return DK_ZONE_COND_UNKNOWN;
+	}
+}
+
+static void
+sd_zone_from_srz(struct dk_zone *zone, struct scsi_report_zones_desc *desc)
+{
+	u_int8_t condition;
+
+	bzero(zone, sizeof(*zone));
+	zone->dz_start_lba = _8btol(desc->zone_start_lba);
+	zone->dz_length_lba = _8btol(desc->zone_length);
+	zone->dz_capacity_lba = zone->dz_length_lba;
+	zone->dz_write_pointer_lba = _8btol(desc->write_pointer_lba);
+
+	zone->dz_type_raw = desc->zone_type & SRZ_TYPE_MASK;
+	zone->dz_type = sd_zone_type(desc->zone_type);
+
+	condition = (desc->zone_flags & SRZ_ZONE_COND_MASK) >>
+	    SRZ_ZONE_COND_SHIFT;
+	zone->dz_condition_raw = condition;
+	zone->dz_condition = sd_zone_condition(condition);
+	zone->dz_flags_raw = desc->zone_flags;
+
+	if (ISSET(desc->zone_flags, SRZ_ZONE_RESET))
+		SET(zone->dz_flags, DK_ZONE_FLAG_RESET_RECOMMENDED);
+	if (ISSET(desc->zone_flags, SRZ_ZONE_NON_SEQ))
+		SET(zone->dz_flags, DK_ZONE_FLAG_NON_SEQ_RESOURCES);
+}
+
+int
+sd_zbc_report_zones(struct sd_softc *sc, u_int64_t start_lba,
+    u_int8_t zbc_option, void *buf, u_int32_t buflen, u_int32_t *datalen,
+    int flags)
+{
+	struct scsi_link	*link;
+	struct scsi_xfer	*xs;
+	struct scsi_zbc_in	*cmd;
+	int			 error;
+
+	if (ISSET(sc->flags, SDF_DYING))
+		return ENXIO;
+	link = sc->sc_link;
+
+	xs = scsi_xs_get(link, flags | SCSI_DATA_IN | SCSI_SILENT);
+	if (xs == NULL)
+		return ENOMEM;
+
+	cmd = (struct scsi_zbc_in *)&xs->cmd;
+	bzero(cmd, sizeof(*cmd));
+	cmd->opcode = ZBC_IN;
+	cmd->service_action = ZBC_IN_SA_REPORT_ZONES;
+	_lto8b(start_lba, cmd->zone_start_lba);
+	_lto4b(buflen, cmd->length);
+	cmd->zone_options = zbc_option & ZBC_IN_REP_MASK;
+
+	xs->cmdlen = sizeof(*cmd);
+	xs->data = buf;
+	xs->datalen = buflen;
+	xs->retries = 2;
+	xs->timeout = 60000;
+
+	error = scsi_xs_sync(xs);
+	if (error == 0 && datalen != NULL) {
+		if (xs->resid <= buflen)
+			*datalen = buflen - xs->resid;
+		else
+			*datalen = 0;
+	}
+
+	scsi_xs_put(xs);
+	return error;
+}
+
+int
+sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
+{
+	struct scsi_report_zones_hdr	*hdr;
+	struct scsi_report_zones_desc	*desc;
+	struct dk_zone			 zone;
+	u_int32_t			 buflen, datalen, entries, hdrlen;
+	u_int32_t			 entries_avail, entries_returned;
+	u_int32_t			 entries_filled, maxentries, i;
+	u_int8_t			 zbc_option;
+	void				*buf;
+	int				 error;
+
+	if (ISSET(sc->flags, SDF_DYING))
+		return ENXIO;
+	if (sc->zone_mode == DK_ZONE_MODE_NONE ||
+	    !ISSET(sc->zone_flags, DK_ZONE_FLAG_REPORT_SUP))
+		return EOPNOTSUPP;
+	if (dzr->dzr_version != DK_ZONE_VERSION)
+		return EINVAL;
+	if (dzr->dzr_entries > 0 && dzr->dzr_zones == NULL)
+		return EINVAL;
+
+	error = sd_zbc_report_option(dzr->dzr_report_option, &zbc_option);
+	if (error != 0)
+		return error;
+
+	maxentries = (MAXPHYS - sizeof(*hdr)) / sizeof(*desc);
+	entries = MIN(dzr->dzr_entries, maxentries);
+	buflen = sizeof(*hdr) + entries * sizeof(*desc);
+
+	buf = dma_alloc(buflen, PR_WAITOK | PR_ZERO);
+	if (buf == NULL)
+		return ENOMEM;
+
+	error = sd_zbc_report_zones(sc, dzr->dzr_start_lba, zbc_option, buf,
+	    buflen, &datalen, 0);
+	if (error != 0)
+		goto done;
+	if (datalen < sizeof(*hdr)) {
+		error = EIO;
+		goto done;
+	}
+
+	hdr = buf;
+	hdrlen = _4btol(hdr->length);
+	entries_avail = hdrlen / sizeof(*desc);
+	entries_returned = MIN((datalen - sizeof(*hdr)) / sizeof(*desc),
+	    entries_avail);
+	entries_filled = MIN(entries_returned, entries);
+
+	dzr->dzr_version = DK_ZONE_VERSION;
+	dzr->dzr_max_lba = _8btol(hdr->maximum_lba);
+	dzr->dzr_same = hdr->byte4 & SRZ_SAME_MASK;
+	dzr->dzr_entries_available = entries_avail;
+	dzr->dzr_entries_filled = entries_filled;
+
+	desc = hdr->desc_list;
+	for (i = 0; i < entries_filled; i++) {
+		sd_zone_from_srz(&zone, &desc[i]);
+		error = copyout(&zone, &dzr->dzr_zones[i], sizeof(zone));
+		if (error != 0)
+			goto done;
+	}
+
+done:
+	dma_free(buf, buflen);
+	return error;
 }
 
 /*
@@ -1629,6 +1883,84 @@ sd_thin_params(struct sd_softc *sc, int flags)
 	return 0;
 }
 
+int
+sd_vpd_zoned(struct sd_softc *sc, int flags)
+{
+	struct scsi_vpd_disk_zoned	*pg;
+	u_int32_t			 value;
+	int				 rv;
+
+	pg = dma_alloc(sizeof(*pg), (ISSET(flags, SCSI_NOSLEEP) ?
+	    PR_NOWAIT : PR_WAITOK) | PR_ZERO);
+	if (pg == NULL)
+		return ENOMEM;
+
+	if (ISSET(sc->flags, SDF_DYING)) {
+		rv = ENXIO;
+		goto done;
+	}
+	rv = scsi_inquire_vpd(sc->sc_link, pg, sizeof(*pg),
+	    SI_PG_DISK_ZONED, flags | SCSI_SILENT);
+	if (rv != 0)
+		goto done;
+
+	if (_2btol(pg->hdr.page_length) < 16) {
+		rv = EOPNOTSUPP;
+		goto done;
+	}
+
+	if (ISSET(pg->flags, VPD_DISK_ZONED_URSWRZ))
+		SET(sc->zone_flags, DK_ZONE_FLAG_UNRESTRICTED_READ);
+	else
+		CLR(sc->zone_flags, DK_ZONE_FLAG_UNRESTRICTED_READ);
+
+	value = _4btol(pg->optimal_seq_zones);
+	if (value != VPD_DISK_ZONED_OPT_SEQ_NR) {
+		sc->zone_optimal_seq_zones = value;
+		SET(sc->zone_flags, DK_ZONE_FLAG_OPT_SEQ_VALID);
+	}
+
+	value = _4btol(pg->optimal_nonseq_zones);
+	if (value != VPD_DISK_ZONED_OPT_NONSEQ_NR) {
+		sc->zone_optimal_nonseq_zones = value;
+		SET(sc->zone_flags, DK_ZONE_FLAG_OPT_NONSEQ_VALID);
+	}
+
+	value = _4btol(pg->max_seq_req_zones);
+	sc->zone_max_seq_zones = value;
+	SET(sc->zone_flags, DK_ZONE_FLAG_MAX_SEQ_VALID);
+
+done:
+	dma_free(pg, sizeof(*pg));
+	return rv;
+}
+
+int
+sd_zoned_params(struct sd_softc *sc, int flags)
+{
+	struct scsi_link	*link = sc->sc_link;
+
+	sc->zone_mode = DK_ZONE_MODE_NONE;
+	sc->zone_flags = 0;
+	sc->zone_optimal_seq_zones = 0;
+	sc->zone_optimal_nonseq_zones = 0;
+	sc->zone_max_seq_zones = 0;
+
+	if ((link->inqdata.device & SID_TYPE) != T_ZBC)
+		return EOPNOTSUPP;
+
+	sc->zone_mode = DK_ZONE_MODE_HOST_MANAGED;
+	SET(sc->zone_flags, DK_ZONE_FLAG_REPORT_SUP);
+	SET(sc->zone_flags, DK_ZONE_FLAG_OPEN_SUP);
+	SET(sc->zone_flags, DK_ZONE_FLAG_CLOSE_SUP);
+	SET(sc->zone_flags, DK_ZONE_FLAG_FINISH_SUP);
+	SET(sc->zone_flags, DK_ZONE_FLAG_RESET_SUP);
+
+	(void)sd_vpd_zoned(sc, flags);
+
+	return 0;
+}
+
 /*
  * Fill out the disk parameter structure. Return 0 if the structure is correctly
  * filled in, otherwise return -1.
@@ -1656,9 +1988,11 @@ sd_get_parms(struct sd_softc *sc, int flags)
 		CLR(sc->flags, SDF_THIN);
 	}
 
+	(void)sd_zoned_params(sc, flags);
+
 	/*
 	 * Work on a copy of the values initialized by sd_read_cap() and
-	 * sd_thin_params().
+	 * sd_thin_params() and sd_zoned_params().
 	 */
 	dp = sc->params;
 
@@ -1827,6 +2161,13 @@ validate:
 			dp.sectors = dp.disksize;
 		}
 	}
+
+	/*
+	 * Until sd(4) has a zone-aware write path, expose host-managed
+	 * zoned devices read-only.
+	 */
+	if (sc->zone_mode == DK_ZONE_MODE_HOST_MANAGED)
+		SET(link->flags, SDEV_READONLY);
 
 #ifdef SCSIDEBUG
 	if (dp.disksize != (u_int64_t)dp.cyls * dp.heads * dp.sectors) {
