@@ -222,7 +222,8 @@ struct scsi_report_luns {
 #define T_BCC		0x10	/* Bridge Controller Commands (BCC) */
 #define T_OSD		0x11	/* Object-based Storage device (OSD) */
 #define T_ADC		0x12	/* Automation/Drive Interface (ADC-2) */
-/* 0x13 - 0x1d RESERVED */
+#define T_ZBC		0x14	/* Zoned block device (ZBC) */
+/* 0x13, 0x15 - 0x1d RESERVED */
 #define T_WELL_KNOWN_LU	0x1e	/* Well known logical unit */
 #define T_NODEVICE	0x1F	/* Unknown or no device type */
 
