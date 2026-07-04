@@ -29,6 +29,7 @@
 #include <sys/mutex.h>
 #include <sys/pool.h>
 #include <sys/disk.h>
+#include <sys/dkio.h>
 
 #include <sys/atomic.h>
 
@@ -59,6 +60,7 @@ int	nvme_resume(struct nvme_softc *);
 void	nvme_dumpregs(struct nvme_softc *);
 int	nvme_identify(struct nvme_softc *, u_int);
 void	nvme_fill_identify(struct nvme_softc *, struct nvme_ccb *, void *);
+int	nvme_identify_zns(struct nvme_softc *, struct scsi_link *);
 
 #ifndef SMALL_KERNEL
 void	nvme_refresh_sensors(void *);
@@ -96,6 +98,12 @@ uint64_t nvme_scsi_size(const struct nvm_identify_namespace *);
 int	nvme_scsi_ioctl(struct scsi_link *, u_long, caddr_t, int);
 int	nvme_passthrough_cmd(struct nvme_softc *, struct nvme_pt_cmd *,
 	int, int);
+int	nvme_zns_ioctl_zoneinfo(struct nvme_softc *, struct scsi_link *,
+	    struct dk_zone_info *);
+int	nvme_zns_ioctl_zonereport(struct nvme_softc *, struct scsi_link *,
+	    struct dk_zone_report *);
+int	nvme_zns_report_zones(struct nvme_softc *, struct scsi_link *,
+	    u_int64_t, u_int8_t, void *, u_int32_t);
 
 #ifdef HIBERNATE
 #include <uvm/uvm_extern.h>
@@ -534,6 +542,7 @@ nvme_scsi_probe(struct scsi_link *link)
 			identify = malloc(sizeof(*identify), M_DEVBUF, M_WAITOK);
 			memcpy(identify, NVME_DMA_KVA(mem), sizeof(*identify));
 			sc->sc_namespaces[link->target].ident = identify;
+			(void)nvme_identify_zns(sc, link);
 		} else {
 			/* Don't attach a namespace if its size is zero. */
 			rv = ENXIO;
@@ -543,6 +552,62 @@ nvme_scsi_probe(struct scsi_link *link)
 	nvme_dmamem_free(sc, mem);
 
 	return (rv);
+}
+
+int
+nvme_identify_zns(struct nvme_softc *sc, struct scsi_link *link)
+{
+	struct nvm_identify_namespace_zns *identify;
+	struct nvm_identify_namespace *ns;
+	struct nvme_sqe sqe;
+	struct nvme_dmamem *mem;
+	struct nvme_ccb *ccb;
+	u_int flbas;
+	int rv;
+
+	ns = sc->sc_namespaces[link->target].ident;
+	if (ns == NULL)
+		return ENXIO;
+
+	ccb = scsi_io_get(&sc->sc_iopool, 0);
+	KASSERT(ccb != NULL);
+
+	mem = nvme_dmamem_alloc(sc, sizeof(*identify));
+	if (mem == NULL) {
+		scsi_io_put(&sc->sc_iopool, ccb);
+		return ENOMEM;
+	}
+
+	memset(&sqe, 0, sizeof(sqe));
+	sqe.opcode = NVM_ADMIN_IDENTIFY;
+	htolem32(&sqe.nsid, link->target);
+	htolem64(&sqe.entry.prp[0], NVME_DMA_DVA(mem));
+	htolem32(&sqe.cdw10, NVM_IDENTIFY_CNS_NS_IOCS);
+	htolem32(&sqe.cdw11, NVM_IDENTIFY_CDW11_CSI(NVM_IDENTIFY_CSI_ZNS));
+
+	ccb->ccb_done = nvme_empty_done;
+	ccb->ccb_cookie = &sqe;
+
+	nvme_dmamem_sync(sc, mem, BUS_DMASYNC_PREREAD);
+	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill,
+	    NVME_TIMO_IDENT);
+	nvme_dmamem_sync(sc, mem, BUS_DMASYNC_POSTREAD);
+
+	if (rv == 0) {
+		identify = NVME_DMA_KVA(mem);
+		flbas = NVME_ID_NS_FLBAS(ns->flbas);
+		if (lemtoh64(&identify->lbafe[flbas].zsze) != 0) {
+			identify = malloc(sizeof(*identify), M_DEVBUF,
+			    M_WAITOK);
+			memcpy(identify, NVME_DMA_KVA(mem), sizeof(*identify));
+			sc->sc_namespaces[link->target].zns = identify;
+		}
+	}
+
+	nvme_dmamem_free(sc, mem);
+	scsi_io_put(&sc->sc_iopool, ccb);
+
+	return rv;
 }
 
 int
@@ -840,7 +905,8 @@ nvme_scsi_inquiry(struct scsi_xfer *xs)
 
 	memset(&inq, 0, sizeof(inq));
 
-	inq.device = T_DIRECT;
+	inq.device = sc->sc_namespaces[link->target].zns != NULL ?
+	    T_ZBC : T_DIRECT;
 	inq.version = SCSI_REV_SPC4;
 	inq.response_format = SID_SCSI2_RESPONSE;
 	inq.additional_length = SID_SCSI2_ALEN;
@@ -927,11 +993,16 @@ nvme_scsi_free(struct scsi_link *link)
 {
 	struct nvme_softc *sc = link->bus->sb_adapter_softc;
 	struct nvm_identify_namespace *identify;
+	struct nvm_identify_namespace_zns *zns;
 
 	identify = sc->sc_namespaces[link->target].ident;
 	sc->sc_namespaces[link->target].ident = NULL;
+	zns = sc->sc_namespaces[link->target].zns;
+	sc->sc_namespaces[link->target].zns = NULL;
 
 	free(identify, M_DEVBUF, sizeof(*identify));
+	if (zns != NULL)
+		free(zns, M_DEVBUF, sizeof(*zns));
 }
 
 uint64_t
@@ -946,6 +1017,255 @@ nvme_scsi_size(const struct nvm_identify_namespace *ns)
 		return ncap;
 	else
 		return nsze;
+}
+
+static int
+nvme_zns_report_option(u_int32_t option, u_int8_t *zras)
+{
+	switch (option) {
+	case DK_ZONE_REP_ALL:
+		*zras = NVM_ZNS_ZRAS_REPORT_ALL;
+		break;
+	case DK_ZONE_REP_EMPTY:
+		*zras = NVM_ZNS_ZRAS_REPORT_EMPTY;
+		break;
+	case DK_ZONE_REP_IMP_OPEN:
+		*zras = NVM_ZNS_ZRAS_REPORT_IMP_OPEN;
+		break;
+	case DK_ZONE_REP_EXP_OPEN:
+		*zras = NVM_ZNS_ZRAS_REPORT_EXP_OPEN;
+		break;
+	case DK_ZONE_REP_CLOSED:
+		*zras = NVM_ZNS_ZRAS_REPORT_CLOSED;
+		break;
+	case DK_ZONE_REP_FULL:
+		*zras = NVM_ZNS_ZRAS_REPORT_FULL;
+		break;
+	case DK_ZONE_REP_READONLY:
+		*zras = NVM_ZNS_ZRAS_REPORT_READONLY;
+		break;
+	case DK_ZONE_REP_OFFLINE:
+		*zras = NVM_ZNS_ZRAS_REPORT_OFFLINE;
+		break;
+	default:
+		return EINVAL;
+	}
+
+	return 0;
+}
+
+static u_int32_t
+nvme_zns_zone_type(u_int8_t type)
+{
+	switch (type) {
+	case NVM_ZNS_ZT_SEQ_REQUIRED:
+		return DK_ZONE_TYPE_SEQ_REQUIRED;
+	default:
+		return DK_ZONE_TYPE_UNKNOWN;
+	}
+}
+
+static u_int32_t
+nvme_zns_zone_condition(u_int8_t state)
+{
+	switch (state) {
+	case NVM_ZNS_ZS_EMPTY:
+		return DK_ZONE_COND_EMPTY;
+	case NVM_ZNS_ZS_IMP_OPEN:
+		return DK_ZONE_COND_IMPLICIT_OPEN;
+	case NVM_ZNS_ZS_EXP_OPEN:
+		return DK_ZONE_COND_EXPLICIT_OPEN;
+	case NVM_ZNS_ZS_CLOSED:
+		return DK_ZONE_COND_CLOSED;
+	case NVM_ZNS_ZS_READONLY:
+		return DK_ZONE_COND_READONLY;
+	case NVM_ZNS_ZS_FULL:
+		return DK_ZONE_COND_FULL;
+	case NVM_ZNS_ZS_OFFLINE:
+		return DK_ZONE_COND_OFFLINE;
+	default:
+		return DK_ZONE_COND_UNKNOWN;
+	}
+}
+
+static void
+nvme_zns_zone_from_desc(struct dk_zone *zone,
+    const struct nvm_zns_zone_desc *desc, u_int64_t zone_size_lba)
+{
+	bzero(zone, sizeof(*zone));
+	zone->dz_start_lba = lemtoh64(&desc->zslba);
+	zone->dz_length_lba = zone_size_lba;
+	zone->dz_capacity_lba = lemtoh64(&desc->zcap);
+	zone->dz_write_pointer_lba = lemtoh64(&desc->wp);
+
+	zone->dz_type_raw = desc->zt;
+	zone->dz_type = nvme_zns_zone_type(desc->zt);
+	zone->dz_condition_raw = desc->zs;
+	zone->dz_condition = nvme_zns_zone_condition(desc->zs);
+	zone->dz_flags_raw = desc->za;
+
+	if (ISSET(desc->za, NVM_ZNS_ZA_RESET_RECOMMENDED))
+		SET(zone->dz_flags, DK_ZONE_FLAG_RESET_RECOMMENDED);
+}
+
+static u_int64_t
+nvme_zns_resource(u_int32_t value)
+{
+	if (value == 0xffffffff)
+		return 0;
+
+	return (u_int64_t)value + 1;
+}
+
+int
+nvme_zns_report_zones(struct nvme_softc *sc, struct scsi_link *link,
+    u_int64_t start_lba, u_int8_t zras, void *buf, u_int32_t buflen)
+{
+	struct nvme_sqe			 sqe;
+	struct nvme_dmamem		*mem;
+	struct nvme_ccb			*ccb;
+	u_int32_t			 cdw13;
+	int				 rv;
+
+	ccb = scsi_io_get(&sc->sc_iopool, 0);
+	KASSERT(ccb != NULL);
+
+	mem = nvme_dmamem_alloc(sc, buflen);
+	if (mem == NULL) {
+		scsi_io_put(&sc->sc_iopool, ccb);
+		return ENOMEM;
+	}
+
+	memset(&sqe, 0, sizeof(sqe));
+	sqe.opcode = NVM_CMD_ZONE_MGMT_RECV;
+	htolem32(&sqe.nsid, link->target);
+	htolem64(&sqe.entry.prp[0], NVME_DMA_DVA(mem));
+	htolem32(&sqe.cdw10, start_lba & 0xffffffff);
+	htolem32(&sqe.cdw11, start_lba >> 32);
+	htolem32(&sqe.cdw12, (buflen / 4) - 1);
+	cdw13 = NVM_ZNS_ZRA(NVM_ZNS_ZRA_REPORT_ZONES) |
+	    NVM_ZNS_ZRAS(zras) | NVM_ZNS_ZR_PARTIAL;
+	htolem32(&sqe.cdw13, cdw13);
+
+	ccb->ccb_done = nvme_empty_done;
+	ccb->ccb_cookie = &sqe;
+
+	nvme_dmamem_sync(sc, mem, BUS_DMASYNC_PREREAD);
+	rv = nvme_poll(sc, sc->sc_q, ccb, nvme_sqe_fill, NVME_TIMO_PT);
+	nvme_dmamem_sync(sc, mem, BUS_DMASYNC_POSTREAD);
+
+	if (rv == 0)
+		memcpy(buf, NVME_DMA_KVA(mem), buflen);
+
+	nvme_dmamem_free(sc, mem);
+	scsi_io_put(&sc->sc_iopool, ccb);
+
+	return rv == 0 ? 0 : EIO;
+}
+
+int
+nvme_zns_ioctl_zoneinfo(struct nvme_softc *sc, struct scsi_link *link,
+    struct dk_zone_info *dzi)
+{
+	struct nvme_namespace *ns = &sc->sc_namespaces[link->target];
+	struct nvm_identify_namespace *ident = ns->ident;
+	struct nvm_identify_namespace_zns *zns = ns->zns;
+	u_int flbas;
+
+	bzero(dzi, sizeof(*dzi));
+	dzi->dzi_version = DK_ZONE_VERSION;
+
+	if (ident == NULL || zns == NULL) {
+		dzi->dzi_zone_mode = DK_ZONE_MODE_NONE;
+		return 0;
+	}
+
+	flbas = NVME_ID_NS_FLBAS(ident->flbas);
+	dzi->dzi_zone_mode = DK_ZONE_MODE_HOST_MANAGED;
+	dzi->dzi_flags = DK_ZONE_FLAG_REPORT_SUP |
+	    DK_ZONE_FLAG_OPEN_SUP | DK_ZONE_FLAG_CLOSE_SUP |
+	    DK_ZONE_FLAG_FINISH_SUP | DK_ZONE_FLAG_RESET_SUP;
+	dzi->dzi_zone_size_lba = lemtoh64(&zns->lbafe[flbas].zsze);
+	dzi->dzi_max_open_zones = nvme_zns_resource(lemtoh32(&zns->mor));
+	dzi->dzi_max_active_zones = nvme_zns_resource(lemtoh32(&zns->mar));
+
+	return 0;
+}
+
+int
+nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
+    struct dk_zone_report *dzr)
+{
+	struct nvme_namespace		*ns = &sc->sc_namespaces[link->target];
+	struct nvm_identify_namespace	*ident = ns->ident;
+	struct nvm_identify_namespace_zns
+					*zns = ns->zns;
+	struct nvm_zns_zone_report	*hdr;
+	struct nvm_zns_zone_desc		*desc;
+	struct dk_zone			 zone;
+	u_int64_t			 nzones;
+	u_int64_t			 zone_size_lba;
+	u_int32_t			 buflen, entries, entries_available;
+	u_int32_t			 entries_filled, maxentries, i;
+	u_int				 flbas;
+	u_int8_t			 zras;
+	void				*buf;
+	int				 error;
+
+	if (ident == NULL || zns == NULL)
+		return EOPNOTSUPP;
+	if (dzr->dzr_version != DK_ZONE_VERSION)
+		return EINVAL;
+	if (dzr->dzr_entries > 0 && dzr->dzr_zones == NULL)
+		return EINVAL;
+
+	error = nvme_zns_report_option(dzr->dzr_report_option, &zras);
+	if (error != 0)
+		return error;
+
+	if (sc->sc_mps < sizeof(*hdr))
+		return EIO;
+
+	maxentries = (sc->sc_mps - sizeof(*hdr)) / sizeof(*desc);
+	entries = MIN(dzr->dzr_entries, maxentries);
+	buflen = sizeof(*hdr) + entries * sizeof(*desc);
+
+	buf = dma_alloc(buflen, PR_WAITOK | PR_ZERO);
+	if (buf == NULL)
+		return ENOMEM;
+
+	error = nvme_zns_report_zones(sc, link, dzr->dzr_start_lba, zras, buf,
+	    buflen);
+	if (error != 0)
+		goto done;
+
+	hdr = buf;
+	desc = hdr->desc;
+	flbas = NVME_ID_NS_FLBAS(ident->flbas);
+	zone_size_lba = lemtoh64(&zns->lbafe[flbas].zsze);
+	nzones = lemtoh64(&hdr->nzones);
+	if (nzones > 0xffffffffU)
+		entries_available = 0xffffffffU;
+	else
+		entries_available = nzones;
+	entries_filled = MIN(entries_available, entries);
+
+	dzr->dzr_version = DK_ZONE_VERSION;
+	dzr->dzr_max_lba = nvme_scsi_size(ident) - 1;
+	dzr->dzr_same = DK_ZONE_SAME_ALL_DIFFERENT;
+	dzr->dzr_entries_filled = entries_filled;
+	dzr->dzr_entries_available = entries_available;
+
+	for (i = 0; i < entries_filled; i++) {
+		nvme_zns_zone_from_desc(&zone, &desc[i], zone_size_lba);
+		error = copyout(&zone, &dzr->dzr_zones[i], sizeof(zone));
+		if (error != 0)
+			break;
+	}
+
+done:
+	dma_free(buf, buflen);
+	return error;
 }
 
 int
@@ -1027,16 +1347,26 @@ int
 nvme_scsi_ioctl(struct scsi_link *link, u_long cmd, caddr_t addr, int flag)
 {
 	struct nvme_softc		*sc = link->bus->sb_adapter_softc;
-	struct nvme_pt_cmd		*pt = (struct nvme_pt_cmd *)addr;
+	struct nvme_pt_cmd		*pt;
 	int				 rv;
 
 	switch (cmd) {
+	case DIOCGZONEINFO:
+		return nvme_zns_ioctl_zoneinfo(sc, link,
+		    (struct dk_zone_info *)addr);
+	case DIOCGZONEREPORT:
+		rw_enter_write(&sc->sc_lock);
+		rv = nvme_zns_ioctl_zonereport(sc, link,
+		    (struct dk_zone_report *)addr);
+		rw_exit_write(&sc->sc_lock);
+		return rv;
 	case NVME_PASSTHROUGH_CMD:
 		break;
 	default:
 		return ENOTTY;
 	}
 
+	pt = (struct nvme_pt_cmd *)addr;
 	if ((pt->pt_cdw10 & 0xff) == 0)
 		pt->pt_nsid = link->target;
 

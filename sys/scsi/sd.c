@@ -1106,8 +1106,16 @@ done:
 int
 sd_ioctl_zoneinfo(struct sd_softc *sc, struct dk_zone_info *dzi)
 {
+	struct scsi_link	*link;
+	int			 rv;
+
 	if (ISSET(sc->flags, SDF_DYING))
 		return ENXIO;
+
+	link = sc->sc_link;
+	rv = scsi_do_ioctl(link, DIOCGZONEINFO, (caddr_t)dzi, 0);
+	if (rv != ENOTTY)
+		return rv;
 
 	bzero(dzi, sizeof(*dzi));
 	dzi->dzi_version = DK_ZONE_VERSION;
@@ -1280,6 +1288,7 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 	struct scsi_report_zones_hdr	*hdr;
 	struct scsi_report_zones_desc	*desc;
 	struct dk_zone			 zone;
+	struct scsi_link		*link;
 	u_int32_t			 buflen, datalen, entries, hdrlen;
 	u_int32_t			 entries_avail, entries_returned;
 	u_int32_t			 entries_filled, maxentries, i;
@@ -1289,6 +1298,11 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 
 	if (ISSET(sc->flags, SDF_DYING))
 		return ENXIO;
+	link = sc->sc_link;
+	error = scsi_do_ioctl(link, DIOCGZONEREPORT, (caddr_t)dzr, 0);
+	if (error != ENOTTY)
+		return error;
+
 	if (sc->zone_mode == DK_ZONE_MODE_NONE ||
 	    !ISSET(sc->zone_flags, DK_ZONE_FLAG_REPORT_SUP))
 		return EOPNOTSUPP;
