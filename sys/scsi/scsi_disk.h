@@ -282,7 +282,82 @@ struct scsi_synchronize_cache {
 	u_int8_t control;
 };
 
+struct scsi_zbc_out {
+	u_int8_t opcode;
+	u_int8_t service_action;
+#define	ZBC_OUT_SA_CLOSE	0x01
+#define	ZBC_OUT_SA_FINISH	0x02
+#define	ZBC_OUT_SA_OPEN		0x03
+#define	ZBC_OUT_SA_RESET	0x04
+	u_int8_t zone_id[8];
+	u_int8_t reserved[4];
+	u_int8_t zone_flags;
+#define	ZBC_OUT_ALL		0x01
+	u_int8_t control;
+};
 
+struct scsi_zbc_in {
+	u_int8_t opcode;
+	u_int8_t service_action;
+#define	ZBC_IN_SA_REPORT_ZONES	0x00
+	u_int8_t zone_start_lba[8];
+	u_int8_t length[4];
+	u_int8_t zone_options;
+#define	ZBC_IN_PARTIAL		0x80
+#define	ZBC_IN_REP_ALL		0x00
+#define	ZBC_IN_REP_EMPTY	0x01
+#define	ZBC_IN_REP_IMP_OPEN	0x02
+#define	ZBC_IN_REP_EXP_OPEN	0x03
+#define	ZBC_IN_REP_CLOSED	0x04
+#define	ZBC_IN_REP_FULL		0x05
+#define	ZBC_IN_REP_READONLY	0x06
+#define	ZBC_IN_REP_OFFLINE	0x07
+#define	ZBC_IN_REP_RESET	0x10
+#define	ZBC_IN_REP_NON_SEQ	0x11
+#define	ZBC_IN_REP_NON_WP	0x3f
+#define	ZBC_IN_REP_MASK		0x3f
+	u_int8_t control;
+};
+
+struct scsi_report_zones_desc {
+	u_int8_t zone_type;
+#define	SRZ_TYPE_CONVENTIONAL	0x01
+#define	SRZ_TYPE_SEQ_REQUIRED	0x02
+#define	SRZ_TYPE_SEQ_PREFERRED	0x03
+#define	SRZ_TYPE_MASK		0x0f
+	u_int8_t zone_flags;
+#define	SRZ_ZONE_COND_SHIFT	4
+#define	SRZ_ZONE_COND_MASK	0xf0
+#define	SRZ_ZONE_COND_NOT_WP	0x00
+#define	SRZ_ZONE_COND_EMPTY	0x10
+#define	SRZ_ZONE_COND_IMP_OPEN	0x20
+#define	SRZ_ZONE_COND_EXP_OPEN	0x30
+#define	SRZ_ZONE_COND_CLOSED	0x40
+#define	SRZ_ZONE_COND_READONLY	0xd0
+#define	SRZ_ZONE_COND_FULL	0xe0
+#define	SRZ_ZONE_COND_OFFLINE	0xf0
+#define	SRZ_ZONE_NON_SEQ	0x02
+#define	SRZ_ZONE_RESET		0x01
+	u_int8_t reserved[6];
+	u_int8_t zone_length[8];
+	u_int8_t zone_start_lba[8];
+	u_int8_t write_pointer_lba[8];
+	u_int8_t reserved2[32];
+};
+
+struct scsi_report_zones_hdr {
+	u_int8_t length[4];
+	u_int8_t byte4;
+#define	SRZ_SAME_ALL_DIFFERENT		0x00
+#define	SRZ_SAME_ALL_SAME		0x01
+#define	SRZ_SAME_LAST_DIFFERENT		0x02
+#define	SRZ_SAME_TYPES_DIFFERENT	0x03
+#define	SRZ_SAME_MASK			0x0f
+	u_int8_t reserved[3];
+	u_int8_t maximum_lba[8];
+	u_int8_t reserved2[48];
+	struct scsi_report_zones_desc desc_list[];
+};
 
 /*
  * Disk specific opcodes
@@ -301,6 +376,8 @@ struct scsi_synchronize_cache {
 #define SYNCHRONIZE_CACHE	0x35
 #define WRITE_SAME_10		0x41
 #define WRITE_SAME_16		0x93
+#define ZBC_OUT			0x94
+#define ZBC_IN			0x95
 #define UNMAP			0x42
 
 
@@ -432,6 +509,7 @@ struct page_caching_mode {
 #define SI_PG_DISK_LIMITS	0xb0 /* block limits */
 #define SI_PG_DISK_INFO		0xb1 /* device characteristics */
 #define SI_PG_DISK_THIN		0xb2 /* thin provisioning */
+#define SI_PG_DISK_ZONED	0xb6 /* zoned block characteristics */
 
 struct scsi_vpd_disk_limits {
 	struct scsi_vpd_hdr hdr;
@@ -491,6 +569,21 @@ struct scsi_vpd_disk_thin {
 	u_int8_t		_reserved1[2];
 
 	/* followed by a designation descriptor if DP is set */
+};
+
+struct scsi_vpd_disk_zoned {
+	struct scsi_vpd_hdr	hdr;
+
+	u_int8_t		flags;
+#define VPD_DISK_ZONED_URSWRZ		(1 << 0)
+	u_int8_t		_reserved1[3];
+	u_int8_t		optimal_seq_zones[4];
+#define VPD_DISK_ZONED_OPT_SEQ_NR	0xffffffff
+	u_int8_t		optimal_nonseq_zones[4];
+#define VPD_DISK_ZONED_OPT_NONSEQ_NR	0xffffffff
+	u_int8_t		max_seq_req_zones[4];
+#define VPD_DISK_ZONED_MAX_SEQ_UNLIMITED	0xffffffff
+	u_int8_t		_reserved2[44];
 };
 
 #endif /* _SCSI_SCSI_DISK_H */
