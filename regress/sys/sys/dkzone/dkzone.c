@@ -26,6 +26,7 @@
 #include <err.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #endif
 
@@ -78,6 +79,12 @@ test_abi(void)
 
 #ifdef __OpenBSD__
 static void
+usage(void)
+{
+	fprintf(stderr, "usage: dkzone [-h] [device]\n");
+}
+
+static void
 test_device(const char *path)
 {
 	struct dk_zone_info info = { 0 };
@@ -126,10 +133,19 @@ main(int argc, char **argv)
 		return error;
 
 #ifdef __OpenBSD__
-	if (argc == 2)
+	if (argc == 2 && (strcmp(argv[1], "-h") == 0 ||
+	    strcmp(argv[1], "--help") == 0)) {
+		usage();
+		return 0;
+	} else if (argc == 2 && argv[1][0] == '-') {
+		usage();
+		return 1;
+	} else if (argc == 2)
 		test_device(argv[1]);
-	else if (argc != 1)
-		errx(1, "usage: dkzone [device]");
+	else if (argc != 1) {
+		usage();
+		return 1;
+	}
 #else
 	(void)argc;
 	(void)argv;
