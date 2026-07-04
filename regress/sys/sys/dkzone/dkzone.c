@@ -20,8 +20,17 @@
 #include <sys/disklabel.h>
 #include <sys/dkio.h>
 
-int
-main(void)
+#ifdef __OpenBSD__
+#include <sys/ioctl.h>
+
+#include <err.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
+#endif
+
+static int
+test_abi(void)
 {
 	struct dk_zone_info info = { 0 };
 	struct dk_zone_report report = { 0 };
@@ -63,6 +72,68 @@ main(void)
 		return __LINE__;
 	if (report.dzr_report_option != DK_ZONE_REP_ALL)
 		return __LINE__;
+
+	return 0;
+}
+
+#ifdef __OpenBSD__
+static void
+test_device(const char *path)
+{
+	struct dk_zone_info info = { 0 };
+	struct dk_zone_report report = { 0 };
+	struct dk_zone zones[2] = { { 0 } };
+	int fd;
+
+	fd = open(path, O_RDONLY);
+	if (fd == -1)
+		err(1, "open %s", path);
+
+	if (ioctl(fd, DIOCGZONEINFO, &info) == -1)
+		err(1, "DIOCGZONEINFO %s", path);
+
+	printf("zone_mode=%u flags=0x%llx\n", info.dzi_zone_mode,
+	    (unsigned long long)info.dzi_flags);
+
+	if (info.dzi_zone_mode == DK_ZONE_MODE_NONE) {
+		close(fd);
+		return;
+	}
+
+	report.dzr_version = DK_ZONE_VERSION;
+	report.dzr_report_option = DK_ZONE_REP_ALL;
+	report.dzr_entries = 2;
+	report.dzr_zones = zones;
+
+	if (ioctl(fd, DIOCGZONEREPORT, &report) == -1)
+		err(1, "DIOCGZONEREPORT %s", path);
+
+	printf("same=%u max_lba=%llu entries_filled=%u entries_available=%u\n",
+	    report.dzr_same, (unsigned long long)report.dzr_max_lba,
+	    report.dzr_entries_filled, report.dzr_entries_available);
+
+	close(fd);
+}
+#endif
+
+int
+main(int argc, char **argv)
+{
+	int error;
+
+	error = test_abi();
+	if (error != 0)
+		return error;
+
+#ifdef __OpenBSD__
+	if (argc == 2)
+		test_device(argv[1]);
+	else if (argc != 1)
+		errx(1, "usage: dkzone [device]");
+#else
+	(void)argc;
+	(void)argv;
+#endif
 
 	return 0;
 }
