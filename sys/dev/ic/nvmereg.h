@@ -255,6 +255,42 @@ struct nvme_cqe {
 #define NVM_CMD_WR_UNCOR	0x04 /* Write Uncorrectable */
 #define NVM_CMD_COMPARE		0x05 /* Compare */
 #define NVM_CMD_DSM		0x09 /* Dataset Management */
+#define NVM_CMD_ZONE_MGMT_SEND	0x79 /* Zoned Namespace Management Send */
+#define NVM_CMD_ZONE_MGMT_RECV	0x7a /* Zoned Namespace Management Receive */
+#define NVM_CMD_ZONE_APPEND	0x7d /* Zoned Namespace Append */
+
+#define NVM_IDENTIFY_CNS_NS		0x00
+#define NVM_IDENTIFY_CNS_CTRL		0x01
+#define NVM_IDENTIFY_CNS_NS_IOCS	0x05
+
+#define NVM_IDENTIFY_CSI_NVM		0x00
+#define NVM_IDENTIFY_CSI_ZNS		0x02
+#define NVM_IDENTIFY_CDW11_CSI(_v)	(((_v) & 0xff) << 24)
+
+#define NVM_ZNS_ZRA_REPORT_ZONES	0x00
+#define NVM_ZNS_ZRAS_REPORT_ALL		0x00
+#define NVM_ZNS_ZRAS_REPORT_EMPTY	0x01
+#define NVM_ZNS_ZRAS_REPORT_IMP_OPEN	0x02
+#define NVM_ZNS_ZRAS_REPORT_EXP_OPEN	0x03
+#define NVM_ZNS_ZRAS_REPORT_CLOSED	0x04
+#define NVM_ZNS_ZRAS_REPORT_FULL	0x05
+#define NVM_ZNS_ZRAS_REPORT_READONLY	0x06
+#define NVM_ZNS_ZRAS_REPORT_OFFLINE	0x07
+#define NVM_ZNS_ZRA(_v)		((_v) & 0xff)
+#define NVM_ZNS_ZRAS(_v)	(((_v) & 0xff) << 8)
+#define NVM_ZNS_ZR_PARTIAL	(1 << 16)
+
+#define NVM_ZNS_ZT_SEQ_REQUIRED		0x02
+
+#define NVM_ZNS_ZS_EMPTY		0x01
+#define NVM_ZNS_ZS_IMP_OPEN		0x02
+#define NVM_ZNS_ZS_EXP_OPEN		0x03
+#define NVM_ZNS_ZS_CLOSED		0x04
+#define NVM_ZNS_ZS_READONLY		0x0d
+#define NVM_ZNS_ZS_FULL			0x0e
+#define NVM_ZNS_ZS_OFFLINE		0x0f
+
+#define NVM_ZNS_ZA_RESET_RECOMMENDED	(1 << 2)
 
 /* Power State Descriptor Data */
 struct nvm_identify_psd {
@@ -414,6 +450,42 @@ struct nvm_identify_namespace {
 	u_int8_t	_reserved2[192];
 
 	u_int8_t	vs[3712];
+} __packed __aligned(8);
+
+struct nvm_zns_namespace_format {
+	u_int64_t	zsze;		/* Zone Size, in logical blocks */
+	u_int8_t	zdes;		/* Zone Descriptor Extension Size */
+	u_int8_t	_reserved[7];
+} __packed __aligned(8);
+
+struct nvm_identify_namespace_zns {
+	u_int16_t	zoc;		/* Zone Operation Characteristics */
+	u_int16_t	ozcs;		/* Optional Zoned Command Support */
+	u_int32_t	mar;		/* Maximum Active Resources */
+	u_int32_t	mor;		/* Maximum Open Resources */
+	u_int32_t	rrl;		/* Reset Recommended Limit */
+	u_int32_t	frl;		/* Finish Recommended Limit */
+	u_int8_t	_reserved[2796];
+	struct nvm_zns_namespace_format
+			lbafe[64];	/* LBA Format Extension */
+	u_int8_t	vs[256];
+} __packed __aligned(8);
+
+struct nvm_zns_zone_desc {
+	u_int8_t	zt;		/* Zone Type */
+	u_int8_t	zs;		/* Zone State */
+	u_int8_t	za;		/* Zone Attributes */
+	u_int8_t	_reserved1[5];
+	u_int64_t	zcap;		/* Zone Capacity */
+	u_int64_t	zslba;		/* Zone Start LBA */
+	u_int64_t	wp;		/* Write Pointer */
+	u_int8_t	_reserved2[32];
+} __packed __aligned(8);
+
+struct nvm_zns_zone_report {
+	u_int64_t	nzones;
+	u_int8_t	_reserved[56];
+	struct nvm_zns_zone_desc desc[0];
 } __packed __aligned(8);
 
 #define NVM_LOG_PAGE_SMART_HEALTH	0x02

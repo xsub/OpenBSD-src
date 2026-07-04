@@ -70,6 +70,7 @@ struct nvme_queue {
 
 struct nvme_namespace {
 	struct nvm_identify_namespace *ident;
+	struct nvm_identify_namespace_zns *zns;
 };
 
 struct nvme_ops {
