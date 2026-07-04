@@ -171,6 +171,16 @@ Used to prevent user and software eject while the media is in use.
 Eject the media cartridge from a removable device.
 .It Dv DIOCINQ Fa "struct dk_inquiry *"
 Read the devices product information.
+.It Dv DIOCGZONEINFO Fa "struct dk_zone_info *"
+Read zoned disk capability and limit information.
+This command returns
+.Er EOPNOTSUPP
+until zoned disk reporting is implemented by the driver.
+.It Dv DIOCGZONEREPORT Fa "struct dk_zone_report *"
+Read zoned disk descriptors from a starting logical block address.
+This command returns
+.Er EOPNOTSUPP
+until zoned disk reporting is implemented by the driver.
 .El
 .Pp
 In addition, the

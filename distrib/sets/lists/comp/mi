@@ -1317,6 +1317,7 @@
 ./usr/include/sys/disk.h
 ./usr/include/sys/disklabel.h
 ./usr/include/sys/dkio.h
+./usr/include/sys/dkzone.h
 ./usr/include/sys/domain.h
 ./usr/include/sys/endian.h
 ./usr/include/sys/errno.h

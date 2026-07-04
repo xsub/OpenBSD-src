@@ -962,6 +962,11 @@ sdioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 			error = sd_flush(sc, 0);
 		goto exit;
 
+	case DIOCGZONEINFO:
+	case DIOCGZONEREPORT:
+		error = EOPNOTSUPP;
+		goto exit;
+
 	default:
 		if (part != RAW_PART) {
 			error = ENOTTY;

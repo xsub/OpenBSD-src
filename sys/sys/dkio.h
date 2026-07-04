@@ -34,6 +34,7 @@
 #define _SYS_DKIO_H_
 
 #include <sys/ioccom.h>
+#include <sys/dkzone.h>
 
 /*
  * Disk-specific ioctls.
@@ -76,5 +77,8 @@ struct dk_diskmap {
 #define	DIOCMAP		_IOWR('d', 119, struct dk_diskmap)
 
 #define	DIOCCACHESYNC	_IOW('d', 120, int)	/* sync cache (force?) */
+
+#define	DIOCGZONEINFO	_IOR('d', 121, struct dk_zone_info)
+#define	DIOCGZONEREPORT	_IOWR('d', 122, struct dk_zone_report)
 
 #endif /* _SYS_DKIO_H_ */
