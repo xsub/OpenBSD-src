@@ -173,14 +173,18 @@ Eject the media cartridge from a removable device.
 Read the devices product information.
 .It Dv DIOCGZONEINFO Fa "struct dk_zone_info *"
 Read zoned disk capability and limit information.
-This command returns
-.Er EOPNOTSUPP
-until zoned disk reporting is implemented by the driver.
+The returned zone mode is
+.Dv DK_ZONE_MODE_NONE
+for devices that do not report native zoned block support.
 .It Dv DIOCGZONEREPORT Fa "struct dk_zone_report *"
 Read zoned disk descriptors from a starting logical block address.
-This command returns
-.Er EOPNOTSUPP
-until zoned disk reporting is implemented by the driver.
+This command is implemented for SCSI Zoned Block Commands devices attached by
+.Nm .
+Zone management commands that modify device state, such as opening, closing,
+finishing, or resetting a zone write pointer, are not implemented.
+Host-managed zoned devices are exposed read-only until
+.Nm
+has a zone-aware write path.
 .El
 .Pp
 In addition, the
