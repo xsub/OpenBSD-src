@@ -15,13 +15,14 @@ Environment:
 - 64 MB zones
 - `zone_size_lba=131072`
 - 128 reported zones
+- OpenBSD 7.9-current-ZBD-dev kernel after the raw sequential write milestone
 
 Run:
 
 ```sh
-cd /usr/src
+cd /home/src/OpenBSD-src
 git pull --ff-only
-cd /usr/src/regress/sys/sys/dkzone
+cd regress/sys/sys/dkzone
 ./dkzone-build.sh
 ./dkzone-vm-smoke.sh /dev/rsd1c 0
 ```
@@ -35,15 +36,16 @@ Expected high-level coverage in the captured run below:
 - protocol-dependent unsupported report filter returning `EOPNOTSUPP`
 - report filters for `empty` and `full`
 - finish/reset zone management
-- ordinary host-managed data write rejection with `EROFS`
-
-Newer runs may also include the `dkzone-write-seq.sh` section, which performs
-one successful raw write at the reported write pointer before probing stale
-write rejection.
+- one-sector sequential raw write at the reported write pointer
+- report verification that the write pointer advanced by one LBA
+- stale/non-WP host-managed data write rejection with `EINVAL` or `EROFS`
 
 Example output:
 
 ```text
+OpenBSD 7.9-current-ZBD-dev (GENERIC.MP) #0
+uname: OpenBSD varm.puffyclouds.click 7.9 GENERIC.MP#0-ZBD-dev arm64
+
 == build dkzone ==
 ==== run-regress-dkzone ====
 ./dkzone
@@ -128,11 +130,26 @@ report=0 (all) same=0 (all-different) start_lba=0 max_lba=16777215 entries_fille
     3               393216               131072               131072               393216 seq-required    empty           0x00000000 0x00000002 0x00000010 0x00000000
 ok
 
+== sequential raw write ==
+== reset zone before sequential write probe ==
+zone_reset lba=0 flags=0x0 ok
+== report reset write pointer ==
+report_one start_lba=0 wp_lba=0 condition=empty
+== write one sector at write pointer ==
+sequential_write lba=0 bytes=512 sectors=1 ok
+== report advanced write pointer ==
+report_one start_lba=0 wp_lba=1 condition=implicit-open
+== reject stale write below write pointer ==
+ordinary_write lba=0 error=EINVAL ok
+== reset zone after sequential write probe ==
+zone_reset lba=0 flags=0x0 ok
+ok
+
 == write policy ==
 == reset zone before write-policy probe ==
 zone_reset lba=0 flags=0x0 ok
-== expect ordinary write to fail with EROFS ==
-ordinary_write lba=0 error=EROFS ok
+== expect stale/non-WP ordinary write to fail ==
+ordinary_write lba=1 error=EROFS ok
 == reset zone after write-policy probe ==
 zone_reset lba=0 flags=0x0 ok
 ok
