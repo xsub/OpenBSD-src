@@ -55,6 +55,7 @@ cd /usr/src/regress/sys/sys/dkzone
 ./obj/dkzone -n 64 -s 0 /dev/rsd1c
 ./obj/dkzone -p -n 4 -s 0 /dev/rsd1c
 ./obj/dkzone -m reset -l 0 /dev/rsd1c
+./dkzone-write-policy.sh /dev/rsd1c 0
 ```
 
 For the QEMU ZNS test disk, the smoke helper rebuilds `dkzone` if needed,
@@ -68,6 +69,11 @@ cd /usr/src/regress/sys/sys/dkzone
 
 `dkzone-zns-smoke.sh` mutates the target zone, so run it only against an
 explicit scratch raw device and pass a zone-start LBA.
+
+`dkzone-write-policy.sh` verifies the conservative host-managed write policy:
+zone management through an `O_RDWR` open must work, while an ordinary data
+write must fail with `EROFS`.  It resets the selected test zone before and
+after the probe.
 
 With a device argument, `dkzone` prints zone capability data and, for zoned
 devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
