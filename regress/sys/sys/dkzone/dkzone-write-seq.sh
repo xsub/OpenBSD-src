@@ -3,9 +3,9 @@ set -eu
 
 usage()
 {
-	echo "usage: $0 raw-device [start-lba]" >&2
-	echo "example: $0 /dev/rsd1c 0" >&2
-	echo "warning: this resets the target zone and writes one sector" >&2
+	echo "usage: $0 raw-device [start-lba [sectors]]" >&2
+	echo "example: $0 /dev/rsd1c 0 8" >&2
+	echo "warning: this resets the target zone and writes sectors" >&2
 	exit 1
 }
 
@@ -19,10 +19,17 @@ case $# in
 1)
 	dev=$1
 	start_lba=0
+	sectors=1
 	;;
 2)
 	dev=$1
 	start_lba=$2
+	sectors=1
+	;;
+3)
+	dev=$1
+	start_lba=$2
+	sectors=$3
 	;;
 *)
 	usage
@@ -40,6 +47,14 @@ esac
 case "$start_lba" in
 ''|*[!0-9]*)
 	die "start-lba must be a non-negative decimal integer"
+	;;
+esac
+case "$sectors" in
+''|*[!0-9]*)
+	die "sectors must be a positive decimal integer"
+	;;
+0)
+	die "sectors must be greater than zero"
 	;;
 esac
 
@@ -65,5 +80,5 @@ cleanup_zone()
 trap cleanup_zone 0 1 2 3 15
 
 cleanup=1
-"$dkzone" -S -s "$start_lba" "$dev"
+"$dkzone" -S -c "$sectors" -s "$start_lba" "$dev"
 cleanup=0

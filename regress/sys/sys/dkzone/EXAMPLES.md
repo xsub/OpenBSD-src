@@ -46,8 +46,9 @@ Expected high-level coverage in the captured run below:
 - protocol-dependent unsupported report filter returning `EOPNOTSUPP`
 - report filters for `empty` and `full`
 - finish/reset zone management
-- one-sector sequential raw write at the reported write pointer
-- report verification that the write pointer advanced by one LBA
+- single-sector and multi-sector sequential raw writes at the reported write
+  pointer
+- report verification that the write pointer advanced by the write size
 - stale/non-WP host-managed data write rejection with `EINVAL` or `EROFS`
 
 Example output:
@@ -61,7 +62,7 @@ uname: OpenBSD varm.puffyclouds.click 7.9 GENERIC.MP#1-ZBD-dev arm64
 zone_reset lba=0 flags=0x0 ok
 == report reset write pointer ==
 report_one start_lba=0 wp_lba=0 condition=empty
-== write one sector at write pointer ==
+== write 1 sector at write pointer ==
 sequential_write lba=0 bytes=512 sectors=1 ok
 == report advanced write pointer ==
 report_one start_lba=0 wp_lba=1 condition=implicit-open
@@ -173,10 +174,25 @@ ok
 zone_reset lba=0 flags=0x0 ok
 == report reset write pointer ==
 report_one start_lba=0 wp_lba=0 condition=empty
-== write one sector at write pointer ==
+== write 1 sector at write pointer ==
 sequential_write lba=0 bytes=512 sectors=1 ok
 == report advanced write pointer ==
 report_one start_lba=0 wp_lba=1 condition=implicit-open
+== reject stale write below write pointer ==
+ordinary_write lba=0 error=EINVAL ok
+== reset zone after sequential write probe ==
+zone_reset lba=0 flags=0x0 ok
+ok
+
+== multi-sector sequential raw write ==
+== reset zone before sequential write probe ==
+zone_reset lba=0 flags=0x0 ok
+== report reset write pointer ==
+report_one start_lba=0 wp_lba=0 condition=empty
+== write 8 sectors at write pointer ==
+sequential_write lba=0 bytes=4096 sectors=8 ok
+== report advanced write pointer ==
+report_one start_lba=0 wp_lba=8 condition=implicit-open
 == reject stale write below write pointer ==
 ordinary_write lba=0 error=EINVAL ok
 == reset zone after sequential write probe ==

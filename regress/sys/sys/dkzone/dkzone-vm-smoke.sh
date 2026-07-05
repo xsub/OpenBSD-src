@@ -119,6 +119,9 @@ section "zone management"
 section "sequential raw write"
 ./dkzone-write-seq.sh "$dev" "$start_lba"
 
+section "multi-sector sequential raw write"
+./dkzone-write-seq.sh "$dev" "$start_lba" 8
+
 section "write policy"
 ./dkzone-write-policy.sh "$dev" "$start_lba"
 
