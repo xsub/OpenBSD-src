@@ -121,6 +121,12 @@ struct dk_zone_report {
 
 	u_int32_t	dzr_entries;
 	u_int32_t	dzr_entries_filled;
+	/*
+	 * Protocol-dependent count for the requested report.  This may
+	 * describe only the current report page, not the total number of
+	 * zones on the device.  Callers that enumerate zones should advance
+	 * dzr_start_lba from the last returned descriptor.
+	 */
 	u_int32_t	dzr_entries_available;
 	struct dk_zone	*dzr_zones;
 	u_int64_t	dzr_reserved[8];
