@@ -112,6 +112,7 @@ struct nvme_softc {
 	size_t			sc_mdts;
 	u_int			sc_max_prpl;
 	u_int			sc_dstrd;
+	u_int			sc_css;
 	u_int			sc_sqe_size;
 
 	struct nvm_identify_controller

@@ -271,7 +271,7 @@ nvme_enable(struct nvme_softc *sc)
 	SET(cc, NVME_CC_IOSQES(6));	/* Submission queue size == 2**6 (64) */
 	SET(cc, NVME_CC_IOCQES(4));	/* Completion queue size == 2**4 (16) */
 	SET(cc, NVME_CC_SHN(NVME_CC_SHN_NONE));
-	SET(cc, NVME_CC_CSS(NVME_CC_CSS_NVM));
+	SET(cc, NVME_CC_CSS(sc->sc_css));
 	SET(cc, NVME_CC_AMS(NVME_CC_AMS_RR));
 	SET(cc, NVME_CC_MPS(ffs(sc->sc_mps) - 1));
 	SET(cc, NVME_CC_EN);
@@ -332,6 +332,9 @@ nvme_attach(struct nvme_softc *sc)
 
 	cap = nvme_read8(sc, NVME_CAP);
 	sc->sc_dstrd = NVME_CAP_DSTRD(cap);
+	sc->sc_css = NVME_CC_CSS_NVM;
+	if (ISSET(NVME_CAP_CSS(cap), NVME_CAP_CSS_CSI))
+		sc->sc_css = NVME_CC_CSS_CSI;
 	if (NVME_CAP_MPSMIN(cap) > PAGE_SHIFT) {
 		printf("%s: NVMe minimum page size %u "
 		    "is greater than CPU page size %u\n", DEVNAME(sc),
