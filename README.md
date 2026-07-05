@@ -54,7 +54,9 @@ cd /usr/src/regress/sys/sys/dkzone
 ./obj/dkzone /dev/rsd0c
 ./obj/dkzone -n 64 -s 0 /dev/rsd1c
 ./obj/dkzone -p -n 4 -s 0 /dev/rsd1c
+./obj/dkzone -r empty -n 4 -s 0 /dev/rsd1c
 ./obj/dkzone -m reset -l 0 /dev/rsd1c
+./dkzone-report-filter.sh /dev/rsd1c 0
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ```
 
@@ -70,6 +72,10 @@ cd /usr/src/regress/sys/sys/dkzone
 `dkzone-zns-smoke.sh` mutates the target zone, so run it only against an
 explicit scratch raw device and pass a zone-start LBA.
 
+`dkzone-report-filter.sh` verifies report filtering by resetting the target
+zone, checking that `-r empty` returns it, finishing it, checking that `-r full`
+returns it, and resetting it again.
+
 `dkzone-write-policy.sh` verifies the conservative host-managed write policy:
 zone management through an `O_RDWR` open must work, while an ordinary data
 write must fail with `EROFS`.  It resets the selected test zone before and
@@ -79,7 +85,8 @@ With a device argument, `dkzone` prints zone capability data and, for zoned
 devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
 the maximum number of entries requested from the kernel, and `-s` sets the
 starting LBA for the report.  The `-p` option pages through reports by
-advancing from the last returned zone descriptor.
+advancing from the last returned zone descriptor.  The `-r` option selects a
+report filter such as `all`, `empty`, `closed`, or `full`.
 
 On a normal non-zoned disk, expected output begins with:
 

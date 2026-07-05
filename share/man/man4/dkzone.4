@@ -83,6 +83,35 @@ and
 .Fa dzr_zones
 to describe the output array.
 .Pp
+The common report options are:
+.Bl -tag -width DK_ZONE_REP_READONLY -compact
+.It Dv DK_ZONE_REP_ALL
+Return all zones.
+.It Dv DK_ZONE_REP_EMPTY
+Return empty zones.
+.It Dv DK_ZONE_REP_IMP_OPEN
+Return implicitly open zones.
+.It Dv DK_ZONE_REP_EXP_OPEN
+Return explicitly open zones.
+.It Dv DK_ZONE_REP_CLOSED
+Return closed zones.
+.It Dv DK_ZONE_REP_FULL
+Return full zones.
+.It Dv DK_ZONE_REP_READONLY
+Return read-only zones.
+.It Dv DK_ZONE_REP_OFFLINE
+Return offline zones.
+.El
+.Pp
+Additional report options such as
+.Dv DK_ZONE_REP_RESET ,
+.Dv DK_ZONE_REP_NON_SEQ ,
+and
+.Dv DK_ZONE_REP_NON_WP
+are protocol-dependent and may return
+.Er EINVAL
+on drivers or devices that cannot express them.
+.Pp
 On return,
 .Fa dzr_entries_filled
 is the number of descriptors copied to userland and
