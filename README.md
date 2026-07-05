@@ -34,6 +34,8 @@ Implemented prototype pieces:
 - initial NVMe ZNS reporting and zone management path
 - QEMU/OpenBSD VM validation workflow
 - experimental raw sequential write gate for one cached zone descriptor
+- CI guardrails that reject stale `DIOCZONEMANAGE`/`dk_zone_manage` ABI
+  fragments and premature kernel ZLFS stubs
 
 Tested so far:
 
@@ -269,6 +271,7 @@ The first ZLFS prototype should be userland-first:
 
 - No production write support yet; only a one-zone raw sequential write probe.
 - No filesystem-level zoned allocation policy yet.
+- No kernel ZLFS stubs yet; early filesystem work should stay userland-first.
 - No promise of ABI stability before review.
 - No attempt to support drive-managed SMR specially; those already appear as normal disks.
 
