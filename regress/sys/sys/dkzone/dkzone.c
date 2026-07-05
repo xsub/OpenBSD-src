@@ -52,6 +52,8 @@ test_abi(void)
 		return __LINE__;
 	if (sizeof(report.dzr_zones) != sizeof(struct dk_zone *))
 		return __LINE__;
+	if (DK_ZONE_WP_INVALID != (u_int64_t)-1)
+		return __LINE__;
 
 	info.dzi_version = DK_ZONE_VERSION;
 	info.dzi_zone_mode = DK_ZONE_MODE_HOST_MANAGED;
