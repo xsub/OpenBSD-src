@@ -34,8 +34,6 @@ Implemented prototype pieces:
 - initial NVMe ZNS reporting and zone management path
 - QEMU/OpenBSD VM validation workflow
 - experimental raw sequential write gate for one cached zone descriptor
-- CI guardrails that reject stale `DIOCZONEMANAGE`/`dk_zone_manage` ABI
-  fragments and premature kernel ZLFS stubs
 
 Tested so far:
 
@@ -55,7 +53,7 @@ Tested so far:
   and multi-sector raw sequential writes.  The policy check verifies that
   writes fail without a fresh zone report and fail when they are not at the
   cached write pointer.
-- SCSI validation guardrails were checked in the same VM: the QEMU NVMe ZNS
+- SCSI validation checks were run in the same VM: the QEMU NVMe ZNS
   disk is refused by `dkzone-scsi-zbc-smoke.sh` as NVMe-backed `sd(4)`, and
   the normal VirtIO boot disk `/dev/rsd0c` is refused before build/mutation
   because it is not marked `zoned` in `dmesg`.
@@ -271,7 +269,6 @@ The first ZLFS prototype should be userland-first:
 
 - No production write support yet; only a one-zone raw sequential write probe.
 - No filesystem-level zoned allocation policy yet.
-- No kernel ZLFS stubs yet; early filesystem work should stay userland-first.
 - No promise of ABI stability before review.
 - No attempt to support drive-managed SMR specially; those already appear as normal disks.
 

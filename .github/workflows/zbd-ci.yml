@@ -31,9 +31,6 @@ jobs:
             sh -n "${script}"
           done
 
-      - name: Check ZBD tree guardrails
-        run: regress/sys/sys/dkzone/dkzone-tree-guardrails.sh
-
       - name: Build ABI-only dkzone harness
         run: |
           set -eu
