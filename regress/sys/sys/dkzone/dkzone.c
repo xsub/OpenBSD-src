@@ -102,7 +102,7 @@ static void
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: dkzone [-h] [-n entries] [-s start-lba] [device]\n");
+	    "usage: dkzone [-h] [-p] [-n entries] [-s start-lba] [device]\n");
 	fprintf(stderr,
 	    "       dkzone -m open|close|finish|reset [-a | -l lba] device\n");
 }
@@ -251,11 +251,11 @@ parse_zone_op(const char *arg)
 }
 
 static void
-print_zone(const struct dk_zone *zone, u_int index)
+print_zone(const struct dk_zone *zone, u_int64_t index)
 {
-	printf("%5u %20llu %20llu %20llu %20llu %-15s %-15s "
+	printf("%5llu %20llu %20llu %20llu %20llu %-15s %-15s "
 	    "0x%08x 0x%08x 0x%08x 0x%08x\n",
-	    index,
+	    (unsigned long long)index,
 	    (unsigned long long)zone->dz_start_lba,
 	    (unsigned long long)zone->dz_length_lba,
 	    (unsigned long long)zone->dz_capacity_lba,
@@ -279,12 +279,17 @@ print_zone_header(void)
 }
 
 static void
-test_device(const char *path, u_int64_t start_lba, u_int entries)
+test_device(const char *path, u_int64_t start_lba, u_int entries,
+    int paginate)
 {
 	struct dk_zone_info info = { 0 };
 	struct dk_zone_report report = { 0 };
 	struct dk_zone *zones;
+	struct dk_zone *last;
 	u_int i;
+	u_int64_t index = 0;
+	u_int64_t next_lba;
+	int header = 0;
 	int fd;
 
 	zones = calloc(entries, sizeof(*zones));
@@ -316,26 +321,48 @@ test_device(const char *path, u_int64_t start_lba, u_int entries)
 		return;
 	}
 
-	report.dzr_version = DK_ZONE_VERSION;
-	report.dzr_report_option = DK_ZONE_REP_ALL;
-	report.dzr_start_lba = start_lba;
-	report.dzr_entries = entries;
-	report.dzr_zones = zones;
+	for (;;) {
+		memset(zones, 0, entries * sizeof(*zones));
+		memset(&report, 0, sizeof(report));
+		report.dzr_version = DK_ZONE_VERSION;
+		report.dzr_report_option = DK_ZONE_REP_ALL;
+		report.dzr_start_lba = start_lba;
+		report.dzr_entries = entries;
+		report.dzr_zones = zones;
 
-	if (ioctl(fd, DIOCGZONEREPORT, &report) == -1)
-		err(1, "DIOCGZONEREPORT %s", path);
+		if (ioctl(fd, DIOCGZONEREPORT, &report) == -1)
+			err(1, "DIOCGZONEREPORT %s", path);
+		if (report.dzr_entries_filled > entries)
+			errx(1, "driver returned too many zone descriptors");
 
-	printf("same=%u (%s) start_lba=%llu max_lba=%llu "
-	    "entries_filled=%u entries_available=%u\n",
-	    report.dzr_same, zone_same_name(report.dzr_same),
-	    (unsigned long long)report.dzr_start_lba,
-	    (unsigned long long)report.dzr_max_lba,
-	    report.dzr_entries_filled, report.dzr_entries_available);
+		printf("same=%u (%s) start_lba=%llu max_lba=%llu "
+		    "entries_filled=%u entries_available=%u\n",
+		    report.dzr_same, zone_same_name(report.dzr_same),
+		    (unsigned long long)report.dzr_start_lba,
+		    (unsigned long long)report.dzr_max_lba,
+		    report.dzr_entries_filled, report.dzr_entries_available);
 
-	if (report.dzr_entries_filled != 0)
-		print_zone_header();
-	for (i = 0; i < report.dzr_entries_filled; i++)
-		print_zone(&zones[i], i);
+		if (report.dzr_entries_filled == 0)
+			break;
+		if (!header) {
+			print_zone_header();
+			header = 1;
+		}
+		for (i = 0; i < report.dzr_entries_filled; i++)
+			print_zone(&zones[i], index++);
+
+		if (!paginate)
+			break;
+
+		last = &zones[report.dzr_entries_filled - 1];
+		next_lba = last->dz_start_lba + last->dz_length_lba;
+		if (last->dz_length_lba == 0 ||
+		    next_lba < last->dz_start_lba || next_lba <= start_lba)
+			errx(1, "zone report did not advance");
+		if (next_lba > report.dzr_max_lba)
+			break;
+		start_lba = next_lba;
+	}
 
 	free(zones);
 	close(fd);
@@ -379,6 +406,7 @@ main(int argc, char **argv)
 	int all = 0;
 	int ch, had_args;
 	int have_lba = 0;
+	int paginate = 0;
 #endif
 	int error;
 
@@ -392,7 +420,7 @@ main(int argc, char **argv)
 		usage();
 		return 0;
 	}
-	while ((ch = getopt(argc, argv, "ahl:m:n:s:")) != -1) {
+	while ((ch = getopt(argc, argv, "ahl:m:n:ps:")) != -1) {
 		switch (ch) {
 		case 'a':
 			all = 1;
@@ -410,6 +438,9 @@ main(int argc, char **argv)
 			break;
 		case 'n':
 			entries = parse_entries(optarg);
+			break;
+		case 'p':
+			paginate = 1;
 			break;
 		case 's':
 			start_lba = parse_u64(optarg, "start LBA");
@@ -431,9 +462,11 @@ main(int argc, char **argv)
 			errx(1, "zone command requires -l lba unless -a is set");
 		if (all && have_lba && cmd_lba != 0)
 			errx(1, "-a requires omitted or zero -l lba");
+		if (paginate)
+			errx(1, "-p is only valid for zone reports");
 		zone_command(argv[0], op, cmd_lba, all);
 	} else if (argc == 1)
-		test_device(argv[0], start_lba, entries);
+		test_device(argv[0], start_lba, entries, paginate);
 	else if (had_args) {
 		usage();
 		return 1;

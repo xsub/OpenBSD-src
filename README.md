@@ -53,6 +53,7 @@ cd /usr/src/regress/sys/sys/dkzone
 ./dkzone-build.sh
 ./obj/dkzone /dev/rsd0c
 ./obj/dkzone -n 64 -s 0 /dev/rsd1c
+./obj/dkzone -p -n 4 -s 0 /dev/rsd1c
 ./obj/dkzone -m reset -l 0 /dev/rsd1c
 ```
 
@@ -71,7 +72,8 @@ explicit scratch raw device and pass a zone-start LBA.
 With a device argument, `dkzone` prints zone capability data and, for zoned
 devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
 the maximum number of entries requested from the kernel, and `-s` sets the
-starting LBA for the report.
+starting LBA for the report.  The `-p` option pages through reports by
+advancing from the last returned zone descriptor.
 
 On a normal non-zoned disk, expected output begins with:
 

@@ -88,6 +88,18 @@ On return,
 is the number of descriptors copied to userland and
 .Fa dzr_entries_available
 is the number of descriptors reported by the device for the requested report.
+The meaning of
+.Fa dzr_entries_available
+is protocol-dependent and may describe only the current report page; callers
+must not use it as the total number of zones on the disk.
+To enumerate zones, continue issuing reports with
+.Fa dzr_start_lba
+set to
+.Fa dz_start_lba No + Fa dz_length_lba
+from the last returned descriptor until no descriptors are returned, no
+forward progress is possible, or
+.Fa dzr_max_lba
+is passed.
 Each descriptor is returned as a
 .Vt struct dk_zone
 containing the zone start LBA, length, capacity, write pointer, type,
