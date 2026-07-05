@@ -75,6 +75,7 @@ the transport-neutral smoke flow to reuse for SCSI ZBC targets.  It rebuilds
 edge case, verifies paginated reporting, checks a protocol-dependent report
 filter, then runs the report filter, finish/reset zone management, and
 ordinary-write rejection smoke tests.
+See `regress/sys/sys/dkzone/EXAMPLES.md` for a captured VM output transcript.
 
 The zone-management helper rebuilds `dkzone` if needed, finishes the selected
 zone, verifies that it reports `full`, resets it, and verifies that it reports
