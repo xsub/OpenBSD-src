@@ -21,6 +21,7 @@
 #define  NVME_CAP_MPSMIN(_r)	(12 + (((_r) >> 48) & 0xf)) /* shift */
 #define  NVME_CAP_CSS(_r)	(((_r) >> 37) & 0x7f)
 #define  NVME_CAP_CSS_NVM	(1 << 0)
+#define  NVME_CAP_CSS_CSI	(1 << 6)
 #define  NVME_CAP_NSSRS(_r)	ISSET((_r), (1ULL << 36))
 #define  NVME_CAP_DSTRD(_r)	(1 << (2 + (((_r) >> 32) & 0xf))) /* bytes */
 #define  NVME_CAP_TO(_r)	(500 * (((_r) >> 24) & 0xff)) /* ms */
@@ -62,6 +63,7 @@
 #define  NVME_CC_CSS_MASK	NVME_CC_CSS(0x7)
 #define  NVME_CC_CSS_R(_v)	(((_v) >> 4) & 0x7)
 #define  NVME_CC_CSS_NVM	0
+#define  NVME_CC_CSS_CSI	6
 #define  NVME_CC_EN		(1 << 0)
 #define NVME_CSTS	0x001c	/* Controller Status */
 #define  NVME_CSTS_SHST_MASK	(0x3 << 2)
