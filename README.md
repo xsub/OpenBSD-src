@@ -1,5 +1,6 @@
-
 # OpenBSD Zoned Block Device Experiments
+
+[![ZBD dkzone checks](https://github.com/xsub/OpenBSD-src/actions/workflows/zbd-ci.yml/badge.svg?branch=main)](https://github.com/xsub/OpenBSD-src/actions/workflows/zbd-ci.yml)
 
 Experimental OpenBSD source fork for native zoned block device support, focused on
 host-managed SCSI ZBC / SMR disks and NVMe Zoned Namespaces.

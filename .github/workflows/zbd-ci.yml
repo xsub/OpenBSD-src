@@ -1,0 +1,53 @@
+name: ZBD dkzone checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dkzone:
+    name: dkzone ABI and scripts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show revision
+        run: git log --oneline -1
+
+      - name: Check dkzone shell helpers
+        run: |
+          set -eu
+          cd regress/sys/sys/dkzone
+          for script in dkzone-*.sh; do
+            echo "sh -n ${script}"
+            sh -n "${script}"
+          done
+
+      - name: Build ABI-only dkzone harness
+        run: |
+          set -eu
+          include_dir="${RUNNER_TEMP}/openbsd-include"
+          mkdir -p "${include_dir}"
+          ln -s "${GITHUB_WORKSPACE}/sys/sys" "${include_dir}/sys"
+          ln -s "${GITHUB_WORKSPACE}/sys/arch/amd64/include" "${include_dir}/machine"
+          cc -std=c99 -Wall -Wextra -I "${include_dir}" \
+            regress/sys/sys/dkzone/dkzone.c \
+            -o "${RUNNER_TEMP}/dkzone-abi"
+          "${RUNNER_TEMP}/dkzone-abi"
+
+      - name: Check ZBD documentation anchors
+        run: |
+          set -eu
+          grep -q 'dkzone-vm-smoke.sh /dev/rsd1c 0' README.md
+          grep -q 'dkzone-scsi-zbc-smoke.sh /dev/rsdXc 0' README.md
+          grep -q 'DIOCGZONEINFO' README.md
+          grep -q 'DIOCGZONEREPORT' README.md
+          grep -q 'DIOCZONECMD' README.md
