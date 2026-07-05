@@ -5,7 +5,7 @@ usage()
 {
 	echo "usage: $0 raw-device [start-lba]" >&2
 	echo "example: $0 /dev/rsd1c 0" >&2
-	echo "warning: this runs mutating ZNS smoke tests" >&2
+	echo "warning: this runs mutating zoned-device smoke tests" >&2
 	exit 1
 }
 
