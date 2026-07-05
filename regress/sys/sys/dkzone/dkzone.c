@@ -140,8 +140,8 @@ parse_entries(const char *arg)
 	u_int64_t value;
 
 	value = parse_u64(arg, "entry count");
-	if (value == 0 || value > DKZONE_MAX_ENTRIES)
-		errx(1, "entry count must be between 1 and %u",
+	if (value > DKZONE_MAX_ENTRIES)
+		errx(1, "entry count must be between 0 and %u",
 		    DKZONE_MAX_ENTRIES);
 
 	return value;
@@ -366,9 +366,15 @@ test_device(const char *path, u_int64_t start_lba, u_int entries,
 	int header = 0;
 	int fd;
 
-	zones = calloc(entries, sizeof(*zones));
-	if (zones == NULL)
-		err(1, "calloc");
+	if (paginate && entries == 0)
+		errx(1, "-p requires a non-zero entry count");
+
+	zones = NULL;
+	if (entries != 0) {
+		zones = calloc(entries, sizeof(*zones));
+		if (zones == NULL)
+			err(1, "calloc");
+	}
 
 	fd = open(path, O_RDONLY);
 	if (fd == -1)
@@ -396,7 +402,8 @@ test_device(const char *path, u_int64_t start_lba, u_int entries,
 	}
 
 	for (;;) {
-		memset(zones, 0, entries * sizeof(*zones));
+		if (entries != 0)
+			memset(zones, 0, entries * sizeof(*zones));
 		memset(&report, 0, sizeof(report));
 		report.dzr_version = DK_ZONE_VERSION;
 		report.dzr_report_option = report_option;

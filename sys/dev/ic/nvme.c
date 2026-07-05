@@ -1055,6 +1055,10 @@ nvme_zns_report_option(u_int32_t option, u_int8_t *zras)
 	case DK_ZONE_REP_OFFLINE:
 		*zras = NVM_ZNS_ZRAS_REPORT_OFFLINE;
 		break;
+	case DK_ZONE_REP_RESET:
+	case DK_ZONE_REP_NON_SEQ:
+	case DK_ZONE_REP_NON_WP:
+		return EOPNOTSUPP;
 	default:
 		return EINVAL;
 	}
