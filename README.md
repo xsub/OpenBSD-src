@@ -65,6 +65,7 @@ cd /usr/src/regress/sys/sys/dkzone
 ./obj/dkzone -r empty -n 4 -s 0 /dev/rsd1c
 ./obj/dkzone -m reset -l 0 /dev/rsd1c
 ./dkzone-report-filter.sh /dev/rsd1c 0
+./dkzone-zone-management.sh /dev/rsd1c 0
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ```
 
@@ -75,17 +76,18 @@ edge case, verifies paginated reporting, checks a protocol-dependent report
 filter, then runs the report filter, finish/reset zone management, and
 ordinary-write rejection smoke tests.
 
-For the QEMU ZNS test disk, the smoke helper rebuilds `dkzone` if needed,
-finishes the selected zone, verifies that it reports `full`, resets it, and
-verifies that it reports `empty` again:
+The zone-management helper rebuilds `dkzone` if needed, finishes the selected
+zone, verifies that it reports `full`, resets it, and verifies that it reports
+`empty` again:
 
 ```sh
 cd /usr/src/regress/sys/sys/dkzone
-./dkzone-zns-smoke.sh /dev/rsd1c 0
+./dkzone-zone-management.sh /dev/rsd1c 0
 ```
 
-`dkzone-zns-smoke.sh` mutates the target zone, so run it only against an
-explicit scratch raw device and pass a zone-start LBA.
+`dkzone-zone-management.sh` mutates the target zone, so run it only against an
+explicit scratch raw device and pass a zone-start LBA.  `dkzone-zns-smoke.sh`
+is kept as a compatibility wrapper for older notes and command history.
 
 `dkzone-report-filter.sh` verifies report filtering by resetting the target
 zone, checking that `-r empty` returns it, finishing it, checking that `-r full`
