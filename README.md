@@ -44,15 +44,17 @@ Tested so far:
   protocol-dependent report filter handling, finish/reset zone management,
   single-sector and multi-sector sequential raw writes at the reported write
   pointer, and bad-write rejection.
-- Post-hardening validation on the OpenBSD/arm64 VM with
-  `OpenBSD 7.9-current-ZBD-dev (GENERIC.MP) #1` passed
-  `dkzone-build.sh`, `dkzone-write-seq.sh`, `dkzone-write-policy.sh`, and
-  `dkzone-vm-smoke.sh /dev/rsd1c 0`.  The policy check verifies that writes
-  fail without a fresh zone report and fail when they are not at the cached
-  write pointer.
+- Post-hardening validation on the OpenBSD/arm64 VM passed `dkzone-build.sh`,
+  `dkzone-write-seq.sh /dev/rsd1c 0 8`, and
+  `dkzone-vm-smoke.sh /dev/rsd1c 0`.  The full smoke now includes single-sector
+  and multi-sector raw sequential writes.  The policy check verifies that
+  writes fail without a fresh zone report and fail when they are not at the
+  cached write pointer.
 - The next cross-transport milestone is to run the same `dkzone-vm-smoke.sh`
-  flow against a SCSI ZBC or host-managed SMR target and compare behavior with
-  the validated NVMe ZNS path.
+  flow against a SCSI ZBC or host-managed SMR target.  The
+  `dkzone-scsi-zbc-smoke.sh` wrapper prints target evidence, verifies
+  host-managed `zone_mode=4`, and then runs the canonical smoke unchanged so
+  the userland behavior can be compared with the validated NVMe ZNS path.
 
 ## Test Helper
 
@@ -78,6 +80,7 @@ cd /usr/src/regress/sys/sys/dkzone
 ./dkzone-write-seq.sh /dev/rsd1c 0
 ./dkzone-write-seq.sh /dev/rsd1c 0 8
 ./dkzone-write-policy.sh /dev/rsd1c 0
+./dkzone-scsi-zbc-smoke.sh /dev/rsdXc 0
 ```
 
 `dkzone-vm-smoke.sh /dev/rsd1c 0` is the canonical QEMU ZNS VM smoke test and
@@ -122,6 +125,14 @@ a multi-sector write.
 The prototype permits only one in-flight raw zoned write against the cached
 descriptor; concurrent report or zone-management operations return `EBUSY`
 while that write is pending.
+
+`dkzone-scsi-zbc-smoke.sh` is the second-transport validation wrapper.  It is
+intended for a real SCSI ZBC or host-managed SMR target exposed as an OpenBSD
+raw disk.  It prints `uname`, `hw.disknames`, and relevant `dmesg` attachment
+lines, verifies that the target reports host-managed `zone_mode=4`, and then
+runs `dkzone-vm-smoke.sh` unchanged.  A passing run is the evidence that the
+ABI and userland behavior are transport-neutral while the kernel handles SCSI
+ZBC and NVMe ZNS differences internally.
 
 With a device argument, `dkzone` prints zone capability data and, for zoned
 devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
@@ -181,13 +192,15 @@ host-managed SMR target:
 
 ```sh
 cd /usr/src/regress/sys/sys/dkzone
-./dkzone-vm-smoke.sh /dev/rsdXc 0
+./dkzone-scsi-zbc-smoke.sh /dev/rsdXc 0
 ```
 
 Replace `rsdXc` with the raw device attached by the SCSI ZBC target.  The
-expected coverage is the same as the QEMU ZNS run: report headers, descriptor
-translation, pagination, report filters, finish/reset zone management,
-sequential raw write at the write pointer, and bad-write rejection.
+wrapper first records target evidence and confirms host-managed `zone_mode=4`,
+then runs the same canonical smoke as the QEMU ZNS path.  Expected coverage is
+the same as the QEMU ZNS run: report headers, descriptor translation,
+pagination, report filters, finish/reset zone management, sequential raw write
+at the write pointer, and bad-write rejection.
 
 The Apple Silicon Homebrew QEMU 11.0.1 build used for the current VM exposes
 NVMe ZNS through `nvme-ns,zoned=on`, but its `scsi-hd` device does not advertise
