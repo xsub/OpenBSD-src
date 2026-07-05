@@ -26,6 +26,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +98,7 @@ test_abi(void)
 #ifdef __OpenBSD__
 #define DKZONE_DEFAULT_ENTRIES	32
 #define DKZONE_MAX_ENTRIES	4096
+#define DKZONE_DEFAULT_SECSIZE	512
 
 static void
 usage(void)
@@ -105,6 +107,8 @@ usage(void)
 	    "usage: dkzone [-h] [-p] [-n entries] [-s start-lba] [device]\n");
 	fprintf(stderr,
 	    "       dkzone -m open|close|finish|reset [-a | -l lba] device\n");
+	fprintf(stderr,
+	    "       dkzone -w [-s start-lba] device\n");
 }
 
 static u_int64_t
@@ -392,6 +396,54 @@ zone_command(const char *path, u_int32_t op, u_int64_t lba, int all)
 
 	close(fd);
 }
+
+static void
+write_probe(const char *path, u_int64_t lba)
+{
+	struct disklabel dl = { 0 };
+	unsigned char *buf;
+	u_int secsize = DKZONE_DEFAULT_SECSIZE;
+	u_int64_t offset64;
+	ssize_t n;
+	int error;
+	int fd;
+
+	fd = open(path, O_RDWR);
+	if (fd == -1)
+		err(1, "open %s", path);
+
+	if (ioctl(fd, DIOCGDINFO, &dl) != -1 && dl.d_secsize != 0)
+		secsize = dl.d_secsize;
+
+	if (lba > (u_int64_t)LLONG_MAX / secsize)
+		errx(1, "write probe LBA is too large");
+	offset64 = lba * secsize;
+
+	buf = calloc(1, secsize);
+	if (buf == NULL)
+		err(1, "calloc");
+
+	if (lseek(fd, (off_t)offset64, SEEK_SET) == -1)
+		err(1, "lseek %s", path);
+
+	n = write(fd, buf, secsize);
+	error = errno;
+
+	free(buf);
+	close(fd);
+
+	if (n == -1 && error == EROFS) {
+		printf("ordinary_write lba=%llu error=EROFS ok\n",
+		    (unsigned long long)lba);
+		return;
+	}
+	if (n == -1) {
+		errno = error;
+		err(1, "ordinary write %s", path);
+	}
+
+	errx(1, "ordinary write unexpectedly wrote %zd bytes", n);
+}
 #endif
 
 int
@@ -407,6 +459,7 @@ main(int argc, char **argv)
 	int ch, had_args;
 	int have_lba = 0;
 	int paginate = 0;
+	int write_policy = 0;
 #endif
 	int error;
 
@@ -420,7 +473,7 @@ main(int argc, char **argv)
 		usage();
 		return 0;
 	}
-	while ((ch = getopt(argc, argv, "ahl:m:n:ps:")) != -1) {
+	while ((ch = getopt(argc, argv, "ahl:m:n:ps:w")) != -1) {
 		switch (ch) {
 		case 'a':
 			all = 1;
@@ -445,6 +498,9 @@ main(int argc, char **argv)
 		case 's':
 			start_lba = parse_u64(optarg, "start LBA");
 			break;
+		case 'w':
+			write_policy = 1;
+			break;
 		default:
 			usage();
 			return 1;
@@ -453,7 +509,15 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	if (cmd != NULL) {
+	if (write_policy) {
+		if (argc != 1) {
+			usage();
+			return 1;
+		}
+		if (cmd != NULL || all || have_lba || paginate)
+			errx(1, "-w cannot be combined with -a, -l, -m, or -p");
+		write_probe(argv[0], start_lba);
+	} else if (cmd != NULL) {
 		if (argc != 1) {
 			usage();
 			return 1;
