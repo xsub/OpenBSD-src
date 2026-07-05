@@ -291,6 +291,7 @@ struct nvme_cqe {
 #define NVM_ZNS_ZS_READONLY		0x0d
 #define NVM_ZNS_ZS_FULL			0x0e
 #define NVM_ZNS_ZS_OFFLINE		0x0f
+#define NVM_ZNS_ZS(_v)			(((_v) >> 4) & 0xf)
 
 #define NVM_ZNS_ZA_RESET_RECOMMENDED	(1 << 2)
 

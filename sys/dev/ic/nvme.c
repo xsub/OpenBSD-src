@@ -1104,7 +1104,7 @@ nvme_zns_zone_from_desc(struct dk_zone *zone,
 	zone->dz_type_raw = desc->zt;
 	zone->dz_type = nvme_zns_zone_type(desc->zt);
 	zone->dz_condition_raw = desc->zs;
-	zone->dz_condition = nvme_zns_zone_condition(desc->zs);
+	zone->dz_condition = nvme_zns_zone_condition(NVM_ZNS_ZS(desc->zs));
 	zone->dz_flags_raw = desc->za;
 
 	if (ISSET(desc->za, NVM_ZNS_ZA_RESET_RECOMMENDED))
