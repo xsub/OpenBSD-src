@@ -105,9 +105,10 @@ zone, checking that `-r empty` returns it, finishing it, checking that `-r full`
 returns it, and resetting it again.
 
 `dkzone-write-policy.sh` verifies the conservative host-managed write policy:
-zone management through an `O_RDWR` open must work, while a data write without
-a fresh zone report, or a data write that is not at the current write pointer,
-must fail.  It resets the selected test zone before and after the probe.
+zone management through an `O_RDWR` open must work, while data writes must fail
+without a fresh descriptor-bearing zone report, after a header-only zone
+report, or when they are not at the current write pointer.  It resets the
+selected test zone before and after the probe.
 
 `dkzone-write-seq.sh` verifies the first experimental write primitive through
 one `dkzone -S` process: reset the zone, report it to populate the kernel's

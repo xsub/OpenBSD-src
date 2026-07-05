@@ -76,6 +76,8 @@ ok
 zone_reset lba=0 flags=0x0 ok
 == expect write at WP without report to fail ==
 ordinary_write lba=0 error=EROFS ok
+== header-only report must not arm write cache ==
+ordinary_write lba=0 error=EROFS ok
 == expect stale/non-WP ordinary write to fail ==
 ordinary_write lba=1 error=EROFS ok
 == reset zone after write-policy probe ==
@@ -185,6 +187,8 @@ ok
 == reset zone before write-policy probe ==
 zone_reset lba=0 flags=0x0 ok
 == expect write at WP without report to fail ==
+ordinary_write lba=0 error=EROFS ok
+== header-only report must not arm write cache ==
 ordinary_write lba=0 error=EROFS ok
 == expect stale/non-WP ordinary write to fail ==
 ordinary_write lba=1 error=EROFS ok
