@@ -104,8 +104,10 @@ int	sd_ioctl_inquiry(struct sd_softc *, struct dk_inquiry *);
 int	sd_ioctl_cache(struct sd_softc *, long, struct dk_cache *);
 int	sd_ioctl_zoneinfo(struct sd_softc *, struct dk_zone_info *);
 int	sd_ioctl_zonereport(struct sd_softc *, struct dk_zone_report *);
+int	sd_ioctl_zonecmd(struct sd_softc *, struct dk_zone_op *, int);
 int	sd_zbc_report_zones(struct sd_softc *, u_int64_t, u_int8_t, void *,
 	    u_int32_t, u_int32_t *, int);
+int	sd_zbc_zone_cmd(struct sd_softc *, u_int64_t, u_int8_t, int, int);
 
 int	sd_cmd_rw6(struct scsi_generic *, int, u_int64_t, u_int32_t);
 int	sd_cmd_rw10(struct scsi_generic *, int, u_int64_t, u_int32_t);
@@ -561,6 +563,12 @@ sdstrategy(struct buf *bp)
 		goto bad;
 	}
 
+	if (sc->zone_mode == DK_ZONE_MODE_HOST_MANAGED &&
+	    !ISSET(bp->b_flags, B_READ)) {
+		bp->b_error = EROFS;
+		goto bad;
+	}
+
 	/* Validate the request. */
 	if (bounds_check_with_label(bp, sc->sc_dk.dk_label) == -1)
 		goto done;
@@ -980,6 +988,18 @@ sdioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 		error = sd_ioctl_zonereport(sc, (struct dk_zone_report *)addr);
 		goto exit;
 
+	case DIOCZONECMD:
+		if (part != RAW_PART) {
+			error = ENOTTY;
+			goto exit;
+		}
+		if (!ISSET(flag, FWRITE)) {
+			error = EBADF;
+			goto exit;
+		}
+		error = sd_ioctl_zonecmd(sc, (struct dk_zone_op *)addr, flag);
+		goto exit;
+
 	default:
 		if (part != RAW_PART) {
 			error = ENOTTY;
@@ -1172,6 +1192,29 @@ sd_zbc_report_option(u_int32_t option, u_int8_t *zbc_option)
 	return 0;
 }
 
+static int
+sd_zbc_zone_action(u_int32_t op, u_int8_t *service_action)
+{
+	switch (op) {
+	case DK_ZONE_OP_CLOSE:
+		*service_action = ZBC_OUT_SA_CLOSE;
+		break;
+	case DK_ZONE_OP_FINISH:
+		*service_action = ZBC_OUT_SA_FINISH;
+		break;
+	case DK_ZONE_OP_OPEN:
+		*service_action = ZBC_OUT_SA_OPEN;
+		break;
+	case DK_ZONE_OP_RESET:
+		*service_action = ZBC_OUT_SA_RESET;
+		break;
+	default:
+		return EINVAL;
+	}
+
+	return 0;
+}
+
 static u_int32_t
 sd_zone_type(u_int8_t type)
 {
@@ -1283,6 +1326,42 @@ sd_zbc_report_zones(struct sd_softc *sc, u_int64_t start_lba,
 }
 
 int
+sd_zbc_zone_cmd(struct sd_softc *sc, u_int64_t lba, u_int8_t service_action,
+    int all, int flags)
+{
+	struct scsi_link	*link;
+	struct scsi_xfer	*xs;
+	struct scsi_zbc_out	*cmd;
+	int			 error;
+
+	if (ISSET(sc->flags, SDF_DYING))
+		return ENXIO;
+	link = sc->sc_link;
+
+	xs = scsi_xs_get(link, flags | SCSI_SILENT);
+	if (xs == NULL)
+		return ENOMEM;
+
+	cmd = (struct scsi_zbc_out *)&xs->cmd;
+	bzero(cmd, sizeof(*cmd));
+	cmd->opcode = ZBC_OUT;
+	cmd->service_action = service_action;
+	_lto8b(lba, cmd->zone_id);
+	if (all)
+		SET(cmd->zone_flags, ZBC_OUT_ALL);
+
+	xs->cmdlen = sizeof(*cmd);
+	xs->retries = 2;
+	xs->timeout = (service_action == ZBC_OUT_SA_RESET ||
+	    service_action == ZBC_OUT_SA_FINISH) ? 300000 : 60000;
+
+	error = scsi_xs_sync(xs);
+
+	scsi_xs_put(xs);
+	return error;
+}
+
+int
 sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 {
 	struct scsi_report_zones_hdr	*hdr;
@@ -1356,6 +1435,59 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 done:
 	dma_free(buf, buflen);
 	return error;
+}
+
+int
+sd_ioctl_zonecmd(struct sd_softc *sc, struct dk_zone_op *dzo, int flags)
+{
+	struct scsi_link	*link;
+	u_int64_t		 required_flag;
+	u_int8_t		 service_action;
+	int			 all, error;
+
+	if (ISSET(sc->flags, SDF_DYING))
+		return ENXIO;
+	link = sc->sc_link;
+
+	error = scsi_do_ioctl(link, DIOCZONECMD, (caddr_t)dzo, flags);
+	if (error != ENOTTY)
+		return error;
+
+	if (sc->zone_mode == DK_ZONE_MODE_NONE)
+		return EOPNOTSUPP;
+	if (dzo->dzo_version != DK_ZONE_VERSION)
+		return EINVAL;
+	if (ISSET(dzo->dzo_flags, ~(u_int64_t)DK_ZONE_OP_F_ALL))
+		return EINVAL;
+
+	all = ISSET(dzo->dzo_flags, DK_ZONE_OP_F_ALL);
+	if (all && dzo->dzo_lba != 0)
+		return EINVAL;
+
+	error = sd_zbc_zone_action(dzo->dzo_op, &service_action);
+	if (error != 0)
+		return error;
+
+	switch (dzo->dzo_op) {
+	case DK_ZONE_OP_CLOSE:
+		required_flag = DK_ZONE_FLAG_CLOSE_SUP;
+		break;
+	case DK_ZONE_OP_FINISH:
+		required_flag = DK_ZONE_FLAG_FINISH_SUP;
+		break;
+	case DK_ZONE_OP_OPEN:
+		required_flag = DK_ZONE_FLAG_OPEN_SUP;
+		break;
+	case DK_ZONE_OP_RESET:
+		required_flag = DK_ZONE_FLAG_RESET_SUP;
+		break;
+	default:
+		return EINVAL;
+	}
+	if (!ISSET(sc->zone_flags, required_flag))
+		return EOPNOTSUPP;
+
+	return sd_zbc_zone_cmd(sc, dzo->dzo_lba, service_action, all, 0);
 }
 
 /*
@@ -2175,13 +2307,6 @@ validate:
 			dp.sectors = dp.disksize;
 		}
 	}
-
-	/*
-	 * Until sd(4) has a zone-aware write path, expose host-managed
-	 * zoned devices read-only.
-	 */
-	if (sc->zone_mode == DK_ZONE_MODE_HOST_MANAGED)
-		SET(link->flags, SDEV_READONLY);
 
 #ifdef SCSIDEBUG
 	if (dp.disksize != (u_int64_t)dp.cyls * dp.heads * dp.sectors) {

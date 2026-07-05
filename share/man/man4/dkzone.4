@@ -26,17 +26,16 @@
 .Nm
 defines a disk
 .Xr ioctl 2
-interface for discovering and reporting native zoned block devices.
+interface for discovering, reporting, and managing native zoned block devices.
 The interface is shared by disk drivers that expose host-visible zones,
 including
 SCSI Zoned Block Commands devices and NVMe Zoned Namespaces.
 .Pp
-The first supported operations are deliberately read-only.
-They allow userland to query whether a disk is zoned and to retrieve zone
-descriptors.
-Zone management commands that change device state, such as opening, closing,
-finishing, or resetting a zone write pointer, are not part of this interface
-yet.
+Capability queries and zone reports are read-only.
+Zone management commands change device state and require the device to be
+opened for writing.
+Normal write support for host-managed devices is a separate concern and may
+remain disabled even when zone management commands are available.
 .Pp
 The following operations are defined in
 .In sys/dkio.h :
@@ -91,6 +90,32 @@ Each descriptor is returned as a
 .Vt struct dk_zone
 containing the zone start LBA, length, capacity, write pointer, type,
 condition, translated flags, and raw protocol values.
+.It Dv DIOCZONECMD Fa "struct dk_zone_op *"
+Execute a zone management command.
+Before calling this operation, userland must set
+.Fa dzo_version
+to
+.Dv DK_ZONE_VERSION ,
+.Fa dzo_op
+to one of
+.Dv DK_ZONE_OP_CLOSE ,
+.Dv DK_ZONE_OP_FINISH ,
+.Dv DK_ZONE_OP_OPEN ,
+or
+.Dv DK_ZONE_OP_RESET ,
+and
+.Fa dzo_lba
+to the absolute device LBA of the target zone.
+Zone management commands must be issued to the raw disk partition.
+.Pp
+If
+.Dv DK_ZONE_OP_F_ALL
+is set in
+.Fa dzo_flags ,
+.Fa dzo_lba
+must be zero and the operation applies to all zones supported by the
+underlying command.
+This operation requires write access to the device.
 .El
 .Sh FILES
 .Bl -tag -width /dev/rsdXXXXX -compact
@@ -103,9 +128,12 @@ The
 ioctls may fail with:
 .Bl -tag -width Er
 .It Bq Er EINVAL
-The ABI version, report option, or output pointer is invalid.
+The ABI version, report option, command option, flags, or output pointer is
+invalid.
+.It Bq Er EBADF
+A zone management command was attempted without opening the device for writing.
 .It Bq Er EOPNOTSUPP
-The disk or driver does not support zone reports.
+The disk or driver does not support the requested zoned operation.
 .It Bq Er ENOTTY
 The device does not implement the requested ioctl.
 .It Bq Er ENXIO
@@ -123,9 +151,13 @@ Zone descriptors could not be copied to userland.
 .Xr sd 4 ,
 .Xr disklabel 5
 .Sh CAVEATS
-The current interface is read-only.
-Host-managed zoned devices are exposed conservatively until the corresponding
-disk driver has a zone-aware write path.
+Zone management commands can change device state.
+In particular, resetting a zone moves its write pointer back to the start of
+the zone and may discard data in that zone.
+.Pp
+Host-managed zoned devices are exposed conservatively.
+The ordinary disk write path may reject writes until the corresponding disk
+driver has zone-aware ordering and write-pointer checks.
 .Pp
 .Nm
 is an ioctl interface, not a user command or a standalone device node.
