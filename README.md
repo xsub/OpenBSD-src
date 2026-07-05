@@ -50,6 +50,7 @@ Run:
 
 ```sh
 cd /usr/src/regress/sys/sys/dkzone
+./dkzone-vm-smoke.sh /dev/rsd1c 0
 ./dkzone-build.sh
 ./obj/dkzone /dev/rsd0c
 ./obj/dkzone -n 64 -s 0 /dev/rsd1c
@@ -59,6 +60,10 @@ cd /usr/src/regress/sys/sys/dkzone
 ./dkzone-report-filter.sh /dev/rsd1c 0
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ```
+
+`dkzone-vm-smoke.sh` is the one-shot VM smoke runner.  It rebuilds `dkzone`,
+checks a single report page, verifies paginated reporting, then runs the report
+filter, zone management, and write-policy smoke tests.
 
 For the QEMU ZNS test disk, the smoke helper rebuilds `dkzone` if needed,
 finishes the selected zone, verifies that it reports `full`, resets it, and
