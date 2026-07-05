@@ -1591,14 +1591,14 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 {
 	struct scsi_report_zones_hdr	*hdr;
 	struct scsi_report_zones_desc	*desc;
-	struct dk_zone			 zone;
+	struct dk_zone			 cache_zone, zone;
 	struct scsi_link		*link;
 	u_int32_t			 buflen, datalen, entries, hdrlen;
 	u_int32_t			 entries_avail, entries_returned;
 	u_int32_t			 entries_filled, maxentries, i;
 	u_int8_t			 zbc_option;
 	void				*buf;
-	int				 error;
+	int				 cache_zone_valid = 0, error;
 
 	if (ISSET(sc->flags, SDF_DYING))
 		return ENXIO;
@@ -1676,9 +1676,13 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 		error = copyout(&zone, &dzr->dzr_zones[i], sizeof(zone));
 		if (error != 0)
 			goto done;
-		if (i == 0)
-			sd_zoned_cache_update(sc, &zone);
+		if (i == 0) {
+			cache_zone = zone;
+			cache_zone_valid = 1;
+		}
 	}
+	if (cache_zone_valid)
+		sd_zoned_cache_update(sc, &cache_zone);
 
 done:
 	dma_free(buf, buflen);
