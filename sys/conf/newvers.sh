@@ -69,6 +69,7 @@ id=`basename "${d}"`
 
 ost="OpenBSD"
 osr="7.9"
+zbdtag="-ZBD-dev"
 
 cat >vers.c <<eof
 #define STATUS "-current"		/* just after a release */
@@ -80,11 +81,11 @@ cat >vers.c <<eof
 
 const char ostype[] = "${ost}";
 const char osrelease[] = "${osr}";
-const char osversion[] = "${id}#${v}";
+const char osversion[] = "${id}#${v}${zbdtag}";
 const char sccs[] =
-    "    @(#)${ost} ${osr}" STATUS " (${id}) #${v}: ${t}\n";
+    "    @(#)${ost} ${osr}" STATUS "${zbdtag}" " (${id}) #${v}: ${t}\n";
 const char version[512] =
-    "${ost} ${osr}" STATUS " (${id}) #${v}: ${t}\n    ${u}@${h}:${d}\n";
+    "${ost} ${osr}" STATUS "${zbdtag}" " (${id}) #${v}: ${t}\n    ${u}@${h}:${d}\n";
 eof
 
 expr ${v} + 1 > version
