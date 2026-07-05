@@ -46,7 +46,8 @@ Tested so far:
   covers zone reports, header-only reports, paginated reports, report filters,
   protocol-dependent report filter handling, finish/reset zone management,
   single-sector and multi-sector sequential raw writes at the reported write
-  pointer, and bad-write rejection.
+  pointer, cached write-pointer continuation across consecutive writes, and
+  bad-write rejection.
 - Post-hardening validation on the OpenBSD/arm64 VM passed `dkzone-build.sh`,
   `dkzone-write-seq.sh /dev/rsd1c 0 8`, and
   `dkzone-vm-smoke.sh /dev/rsd1c 0`.  The full smoke now includes single-sector
@@ -87,6 +88,7 @@ cd /usr/src/regress/sys/sys/dkzone
 ./dkzone-zone-management.sh /dev/rsd1c 0
 ./dkzone-write-seq.sh /dev/rsd1c 0
 ./dkzone-write-seq.sh /dev/rsd1c 0 8
+./dkzone-write-seq.sh /dev/rsd1c 0 8 2
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ./dkzone-scsi-zbc-smoke.sh /dev/rsdXc 0
 ```
@@ -96,8 +98,8 @@ the transport-neutral smoke flow to reuse for SCSI ZBC targets.  It rebuilds
 `dkzone`, checks a single report page, verifies the header-only `-n 0` report
 edge case, verifies paginated reporting, checks a protocol-dependent report
 filter, then runs the report filter, finish/reset zone management, and
-single-sector and multi-sector sequential raw write and bad-write rejection
-smoke tests.
+single-sector, multi-sector, cached write-pointer continuation, and bad-write
+rejection smoke tests.
 See `regress/sys/sys/dkzone/EXAMPLES.md` for a captured VM output transcript.
 
 The zone-management helper rebuilds `dkzone` if needed, finishes the selected
@@ -129,7 +131,9 @@ cached zone descriptor, write the requested number of sectors at the reported
 write pointer, report again and verify that the write pointer advanced by that
 sector count, reject a stale write below the new write pointer, then reset the
 zone.  The default is one sector; pass a third argument such as `8` to exercise
-a multi-sector write.
+a multi-sector write.  Pass a fourth argument such as `2` to issue consecutive
+writes without an intervening report and verify that the kernel's cached write
+pointer advances between writes.
 The prototype permits only one in-flight raw zoned write against the cached
 descriptor; concurrent report or zone-management operations return `EBUSY`
 while that write is pending.

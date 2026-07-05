@@ -122,6 +122,9 @@ section "sequential raw write"
 section "multi-sector sequential raw write"
 ./dkzone-write-seq.sh "$dev" "$start_lba" 8
 
+section "cached write pointer continuation"
+./dkzone-write-seq.sh "$dev" "$start_lba" 8 2
+
 section "write policy"
 ./dkzone-write-policy.sh "$dev" "$start_lba"
 

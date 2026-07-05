@@ -33,6 +33,7 @@ the full smoke:
 ```sh
 ./dkzone-build.sh
 ./dkzone-write-seq.sh /dev/rsd1c 0
+./dkzone-write-seq.sh /dev/rsd1c 0 8 2
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ./dkzone-vm-smoke.sh /dev/rsd1c 0
 ```
@@ -48,6 +49,7 @@ Expected high-level coverage in the captured run below:
 - finish/reset zone management
 - single-sector and multi-sector sequential raw writes at the reported write
   pointer
+- consecutive sequential raw writes without an intervening zone report
 - report verification that the write pointer advanced by the write size
 - stale/non-WP host-managed data write rejection with `EINVAL` or `EROFS`
 
@@ -219,6 +221,22 @@ report_one start_lba=0 wp_lba=0 condition=empty
 sequential_write lba=0 bytes=4096 sectors=8 ok
 == report advanced write pointer ==
 report_one start_lba=0 wp_lba=8 condition=implicit-open
+== reject stale write below write pointer ==
+ordinary_write lba=0 error=EINVAL ok
+== reset zone after sequential write probe ==
+zone_reset lba=0 flags=0x0 ok
+ok
+
+== cached write pointer continuation ==
+== reset zone before sequential write probe ==
+zone_reset lba=0 flags=0x0 ok
+== report reset write pointer ==
+report_one start_lba=0 wp_lba=0 condition=empty
+== write 2 x 8 sectors at write pointer ==
+sequential_write index=0 lba=0 bytes=4096 sectors=8 ok
+sequential_write index=1 lba=8 bytes=4096 sectors=8 ok
+== report advanced write pointer ==
+report_one start_lba=0 wp_lba=16 condition=implicit-open
 == reject stale write below write pointer ==
 ordinary_write lba=0 error=EINVAL ok
 == reset zone after sequential write probe ==

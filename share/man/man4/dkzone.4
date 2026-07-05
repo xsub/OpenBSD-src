@@ -215,6 +215,9 @@ The ordinary disk write path may reject writes unless the corresponding disk
 driver has zone-aware ordering and write-pointer checks.
 The current prototype only permits tightly bounded raw-partition writes that
 match a sequential-zone write pointer cached from a fresh zone report.
+After a successful experimental raw write, the driver advances the cached
+write pointer by the transfer length so a following raw write may append at
+the next write pointer without another zone report.
 Zone management commands invalidate that cache.
 Only one experimental raw zoned write may be in flight at a time.
 .Pp
