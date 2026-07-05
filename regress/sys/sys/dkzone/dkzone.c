@@ -114,8 +114,12 @@ parse_u64(const char *arg, const char *name)
 	errno = 0;
 	value = strtoull(arg, &ep, 0);
 	if (arg[0] == '\0' || arg[0] == '-' || *ep != '\0' ||
-	    errno == ERANGE)
+	    errno == ERANGE) {
+		if (strncmp(arg, "/dev/", 5) == 0)
+			errx(1, "missing numeric %s before device %s",
+			    name, arg);
 		errx(1, "invalid %s: %s", name, arg);
+	}
 
 	return value;
 }
