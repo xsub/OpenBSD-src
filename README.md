@@ -49,11 +49,14 @@ Tested so far:
   pointer, cached write-pointer continuation across consecutive writes, and
   bad-write rejection.
 - Post-hardening validation on the OpenBSD/arm64 VM passed `dkzone-build.sh`,
-  `dkzone-write-seq.sh /dev/rsd1c 0 8`, and
-  `dkzone-vm-smoke.sh /dev/rsd1c 0`.  The full smoke now includes single-sector
-  and multi-sector raw sequential writes.  The policy check verifies that
-  writes fail without a fresh zone report and fail when they are not at the
-  cached write pointer.
+  `dkzone-write-seq.sh /dev/rsd1c 0 8`,
+  `dkzone-write-seq.sh /dev/rsd1c 0 8 2`, and
+  `dkzone-vm-smoke.sh /dev/rsd1c 0`.  The focused continuation check verifies
+  two consecutive 8-sector raw writes after one fresh zone report and confirms
+  that the reported write pointer advances to LBA 16.  The full smoke includes
+  single-sector, multi-sector, cached write-pointer continuation, and bad-write
+  rejection coverage.  The policy check verifies that writes fail without a
+  fresh zone report and fail when they are not at the cached write pointer.
 - SCSI validation checks were run in the same VM: the QEMU NVMe ZNS
   disk is refused by `dkzone-scsi-zbc-smoke.sh` as NVMe-backed `sd(4)`, and
   the normal VirtIO boot disk `/dev/rsd0c` is refused before build/mutation
@@ -234,8 +237,9 @@ that can present SCSI ZBC semantics.
 3. Validate the same smoke flow on SCSI ZBC or host-managed SMR hardware.
 4. Compare SCSI ZBC and NVMe ZNS edge cases for report filters, write-pointer
    normalization, and zone management errors.
-5. Prove the raw sequential write primitive: reset, write at WP, report WP
-   advanced, reject stale/non-WP writes.
+5. Keep hardening the raw sequential write primitive now that QEMU ZNS proves:
+   reset, write at WP, cached WP continuation, report WP advanced, and reject
+   stale/non-WP writes.
 6. Add richer regress coverage for zone report layouts and option mapping.
 7. Design safe write-path semantics for host-managed sequential zones.
 8. Validate zone reset/open/close/finish operations on SCSI ZBC and NVMe ZNS.
@@ -249,8 +253,13 @@ ZLFS is intentionally behind the raw write-pointer milestone.  The filesystem
 work should start only after the kernel and `dkzone-write-seq.sh` demonstrate:
 
 ```text
-reset zone -> write exactly at WP -> report WP advanced -> reject stale write
+reset zone -> write exactly at WP -> continue from cached WP
+report WP advanced -> reject stale write
 ```
+
+The QEMU ZNS VM now demonstrates that sequence with two consecutive 8-sector
+writes and a final reported write pointer of LBA 16.  The next confidence step
+is to repeat the same contract on a SCSI ZBC or host-managed SMR target.
 
 The first ZLFS prototype should be userland-first:
 
