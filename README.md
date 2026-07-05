@@ -31,9 +31,10 @@ Implemented prototype pieces:
 Tested so far:
 
 - ABI regression builds and runs on OpenBSD/arm64.
-- Non-zoned disk reports `zone_mode=0 flags=0x0`.
+- Non-zoned disk reports `zone_mode=0 (none)` and skips zone reports.
 - Kernel boots on OpenBSD/arm64 VM.
-- NVMe ZNS backend has passed syntax checks and needs full VM validation.
+- QEMU NVMe ZNS attaches as an `sd(4)` disk marked `zoned, readonly`.
+- NVMe ZNS `DIOCGZONEINFO` and `DIOCGZONEREPORT` work in the VM.
 
 ## Test Helper
 
@@ -51,16 +52,23 @@ make clean
 make obj
 make regress
 ./obj/dkzone /dev/rsd0c
+./obj/dkzone -n 64 -s 0 /dev/rsd1c
 ```
 
-On a normal non-zoned disk, expected output is:
+With a device argument, `dkzone` prints zone capability data and, for zoned
+devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
+the maximum number of entries requested from the kernel, and `-s` sets the
+starting LBA for the report.
+
+On a normal non-zoned disk, expected output begins with:
 
 ```text
-zone_mode=0 flags=0x0
+zone_mode=0 (none) flags=0x0 zone_size_lba=0
 ```
 
-On a zoned device, the helper should print zone capability data and a small
-zone report.
+On a zoned device, the helper reports each returned zone with start LBA, length,
+capacity, write pointer, translated type, translated condition, translated
+flags, and raw protocol values.
 
 ## QEMU NVMe ZNS Target
 
