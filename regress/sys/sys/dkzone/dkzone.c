@@ -104,11 +104,15 @@ static void
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: dkzone [-h] [-p] [-n entries] [-s start-lba] [device]\n");
+	    "usage: dkzone [-h] [-p] [-r report] [-n entries] "
+	    "[-s start-lba] [device]\n");
 	fprintf(stderr,
 	    "       dkzone -m open|close|finish|reset [-a | -l lba] device\n");
 	fprintf(stderr,
 	    "       dkzone -w [-s start-lba] device\n");
+	fprintf(stderr,
+	    "reports: all empty imp-open exp-open closed full readonly "
+	    "offline reset non-seq non-wp\n");
 }
 
 static u_int64_t
@@ -222,6 +226,72 @@ zone_same_name(u_int32_t same)
 }
 
 static const char *
+zone_report_name(u_int32_t option)
+{
+	switch (option) {
+	case DK_ZONE_REP_ALL:
+		return "all";
+	case DK_ZONE_REP_EMPTY:
+		return "empty";
+	case DK_ZONE_REP_IMP_OPEN:
+		return "imp-open";
+	case DK_ZONE_REP_EXP_OPEN:
+		return "exp-open";
+	case DK_ZONE_REP_CLOSED:
+		return "closed";
+	case DK_ZONE_REP_FULL:
+		return "full";
+	case DK_ZONE_REP_READONLY:
+		return "readonly";
+	case DK_ZONE_REP_OFFLINE:
+		return "offline";
+	case DK_ZONE_REP_RESET:
+		return "reset";
+	case DK_ZONE_REP_NON_SEQ:
+		return "non-seq";
+	case DK_ZONE_REP_NON_WP:
+		return "non-wp";
+	default:
+		return "unknown";
+	}
+}
+
+static u_int32_t
+parse_zone_report(const char *arg)
+{
+	if (strcmp(arg, "all") == 0)
+		return DK_ZONE_REP_ALL;
+	if (strcmp(arg, "empty") == 0)
+		return DK_ZONE_REP_EMPTY;
+	if (strcmp(arg, "imp-open") == 0 ||
+	    strcmp(arg, "implicit-open") == 0)
+		return DK_ZONE_REP_IMP_OPEN;
+	if (strcmp(arg, "exp-open") == 0 ||
+	    strcmp(arg, "explicit-open") == 0)
+		return DK_ZONE_REP_EXP_OPEN;
+	if (strcmp(arg, "closed") == 0)
+		return DK_ZONE_REP_CLOSED;
+	if (strcmp(arg, "full") == 0)
+		return DK_ZONE_REP_FULL;
+	if (strcmp(arg, "readonly") == 0 ||
+	    strcmp(arg, "read-only") == 0)
+		return DK_ZONE_REP_READONLY;
+	if (strcmp(arg, "offline") == 0)
+		return DK_ZONE_REP_OFFLINE;
+	if (strcmp(arg, "reset") == 0)
+		return DK_ZONE_REP_RESET;
+	if (strcmp(arg, "non-seq") == 0 ||
+	    strcmp(arg, "nonseq") == 0)
+		return DK_ZONE_REP_NON_SEQ;
+	if (strcmp(arg, "non-wp") == 0 ||
+	    strcmp(arg, "nonwp") == 0)
+		return DK_ZONE_REP_NON_WP;
+
+	errx(1, "invalid zone report: %s", arg);
+	return 0;
+}
+
+static const char *
 zone_op_name(u_int32_t op)
 {
 	switch (op) {
@@ -284,7 +354,7 @@ print_zone_header(void)
 
 static void
 test_device(const char *path, u_int64_t start_lba, u_int entries,
-    int paginate)
+    u_int32_t report_option, int paginate)
 {
 	struct dk_zone_info info = { 0 };
 	struct dk_zone_report report = { 0 };
@@ -329,7 +399,7 @@ test_device(const char *path, u_int64_t start_lba, u_int entries,
 		memset(zones, 0, entries * sizeof(*zones));
 		memset(&report, 0, sizeof(report));
 		report.dzr_version = DK_ZONE_VERSION;
-		report.dzr_report_option = DK_ZONE_REP_ALL;
+		report.dzr_report_option = report_option;
 		report.dzr_start_lba = start_lba;
 		report.dzr_entries = entries;
 		report.dzr_zones = zones;
@@ -339,8 +409,10 @@ test_device(const char *path, u_int64_t start_lba, u_int entries,
 		if (report.dzr_entries_filled > entries)
 			errx(1, "driver returned too many zone descriptors");
 
-		printf("same=%u (%s) start_lba=%llu max_lba=%llu "
+		printf("report=%u (%s) same=%u (%s) start_lba=%llu max_lba=%llu "
 		    "entries_filled=%u entries_available=%u\n",
+		    report.dzr_report_option,
+		    zone_report_name(report.dzr_report_option),
 		    report.dzr_same, zone_same_name(report.dzr_same),
 		    (unsigned long long)report.dzr_start_lba,
 		    (unsigned long long)report.dzr_max_lba,
@@ -453,11 +525,13 @@ main(int argc, char **argv)
 	const char *cmd = NULL;
 	u_int entries = DKZONE_DEFAULT_ENTRIES;
 	u_int32_t op = 0;
+	u_int32_t report_option = DK_ZONE_REP_ALL;
 	u_int64_t cmd_lba = 0;
 	u_int64_t start_lba = 0;
 	int all = 0;
 	int ch, had_args;
 	int have_lba = 0;
+	int have_report_option = 0;
 	int paginate = 0;
 	int write_policy = 0;
 #endif
@@ -473,7 +547,7 @@ main(int argc, char **argv)
 		usage();
 		return 0;
 	}
-	while ((ch = getopt(argc, argv, "ahl:m:n:ps:w")) != -1) {
+	while ((ch = getopt(argc, argv, "ahl:m:n:pr:s:w")) != -1) {
 		switch (ch) {
 		case 'a':
 			all = 1;
@@ -495,6 +569,10 @@ main(int argc, char **argv)
 		case 'p':
 			paginate = 1;
 			break;
+		case 'r':
+			report_option = parse_zone_report(optarg);
+			have_report_option = 1;
+			break;
 		case 's':
 			start_lba = parse_u64(optarg, "start LBA");
 			break;
@@ -514,8 +592,10 @@ main(int argc, char **argv)
 			usage();
 			return 1;
 		}
-		if (cmd != NULL || all || have_lba || paginate)
-			errx(1, "-w cannot be combined with -a, -l, -m, or -p");
+		if (cmd != NULL || all || have_lba || have_report_option ||
+		    paginate)
+			errx(1, "-w cannot be combined with -a, -l, -m, "
+			    "-p, or -r");
 		write_probe(argv[0], start_lba);
 	} else if (cmd != NULL) {
 		if (argc != 1) {
@@ -528,9 +608,12 @@ main(int argc, char **argv)
 			errx(1, "-a requires omitted or zero -l lba");
 		if (paginate)
 			errx(1, "-p is only valid for zone reports");
+		if (have_report_option)
+			errx(1, "-r is only valid for zone reports");
 		zone_command(argv[0], op, cmd_lba, all);
 	} else if (argc == 1)
-		test_device(argv[0], start_lba, entries, paginate);
+		test_device(argv[0], start_lba, entries, report_option,
+		    paginate);
 	else if (had_args) {
 		usage();
 		return 1;
