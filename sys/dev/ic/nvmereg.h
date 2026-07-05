@@ -282,6 +282,13 @@ struct nvme_cqe {
 #define NVM_ZNS_ZRAS(_v)	(((_v) & 0xff) << 8)
 #define NVM_ZNS_ZR_PARTIAL	(1 << 16)
 
+#define NVM_ZNS_ZSA_CLOSE		0x01
+#define NVM_ZNS_ZSA_FINISH		0x02
+#define NVM_ZNS_ZSA_OPEN		0x03
+#define NVM_ZNS_ZSA_RESET		0x04
+#define NVM_ZNS_ZSA(_v)		((_v) & 0xff)
+#define NVM_ZNS_ZSA_SELECT_ALL		(1 << 8)
+
 #define NVM_ZNS_ZT_SEQ_REQUIRED		0x02
 
 #define NVM_ZNS_ZS_EMPTY		0x01

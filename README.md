@@ -10,6 +10,7 @@ This is research and bring-up work, not production-ready storage code.
 
 - Add a small native OpenBSD ABI for zoned block discovery.
 - Support read-only zone capability queries and zone reports first.
+- Add explicit zone management commands before ordinary host-managed writes.
 - Keep host-managed devices safe until write ordering is implemented.
 - Validate behavior with OpenBSD regress tests and QEMU-emulated zoned devices.
 - Build toward real host-managed write support only after the read-only path is stable.
@@ -21,11 +22,12 @@ Implemented prototype pieces:
 - `sys/sys/dkzone.h`
 - `DIOCGZONEINFO`
 - `DIOCGZONEREPORT`
+- `DIOCZONECMD` for explicit open/close/finish/reset zone management
 - `sd(4)` recognition of SCSI ZBC host-managed devices
 - SCSI `REPORT ZONES` translation into OpenBSD `struct dk_zone`
-- read-only handling for host-managed zoned disks
+- ordinary-write rejection for host-managed zoned disks
 - regression smoke test under `regress/sys/sys/dkzone`
-- initial read-only NVMe ZNS reporting path
+- initial NVMe ZNS reporting and zone management path
 - QEMU/OpenBSD VM validation workflow
 
 Tested so far:
@@ -33,7 +35,7 @@ Tested so far:
 - ABI regression builds and runs on OpenBSD/arm64.
 - Non-zoned disk reports `zone_mode=0 (none)` and skips zone reports.
 - Kernel boots on OpenBSD/arm64 VM.
-- QEMU NVMe ZNS attaches as an `sd(4)` disk marked `zoned, readonly`.
+- QEMU NVMe ZNS attaches as an `sd(4)` disk marked `zoned`.
 - NVMe ZNS `DIOCGZONEINFO` and `DIOCGZONEREPORT` work in the VM.
 
 ## Test Helper
@@ -53,6 +55,7 @@ make obj
 make regress
 ./obj/dkzone /dev/rsd0c
 ./obj/dkzone -n 64 -s 0 /dev/rsd1c
+./obj/dkzone -m reset -l 0 /dev/rsd1c
 ```
 
 With a device argument, `dkzone` prints zone capability data and, for zoned
@@ -69,6 +72,10 @@ zone_mode=0 (none) flags=0x0 zone_size_lba=0
 On a zoned device, the helper reports each returned zone with start LBA, length,
 capacity, write pointer, translated type, translated condition, translated
 flags, and raw protocol values.
+
+The `-m` option issues an explicit zone management command.  Supported commands
+are `open`, `close`, `finish`, and `reset`.  Use `-l` for a single zone LBA or
+`-a` for the protocol's all-zones form.
 
 ## QEMU NVMe ZNS Target
 
@@ -93,12 +100,12 @@ sysctl hw.disknames
 
 ## Roadmap
 
-1. Stabilize read-only ABI.
+1. Stabilize reporting and management ABI.
 2. Validate SCSI ZBC host-managed reporting against real or emulated devices.
 3. Validate NVMe ZNS reporting under QEMU.
 4. Add richer regress coverage for zone report layouts and option mapping.
 5. Design safe write-path semantics for host-managed sequential zones.
-6. Add zone reset/open/close/finish operations only after read-only reporting is reliable.
+6. Validate zone reset/open/close/finish operations on SCSI ZBC and NVMe ZNS.
 7. Evaluate filesystem and buffer-cache implications before enabling writable host-managed devices.
 
 ## Non-Goals For The Current Prototype
@@ -111,8 +118,8 @@ sysctl hw.disknames
 ## Safety Model
 
 Host-managed zoned devices are exposed conservatively. The first milestone is
-discovery and reporting. Writable support must preserve sequential-write rules
-before it can be enabled safely.
+discovery, reporting, and explicit zone management. Ordinary writable support
+must preserve sequential-write rules before it can be enabled safely.
 
 ## References
 

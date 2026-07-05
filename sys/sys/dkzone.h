@@ -21,10 +21,10 @@
 #include <sys/types.h>
 
 /*
- * User/kernel ABI for zoned disk devices.  The first supported operations are
- * deliberately read-only: query device zoned capabilities and report zone
- * descriptors.  Zone management commands that change device state should use a
- * separate ABI extension once read-only reporting is proven.
+ * User/kernel ABI for zoned disk devices.  Capability queries and zone reports
+ * are read-only.  Zone management operations change device state and are kept
+ * in a separate command structure so normal write support can be developed
+ * independently.
  */
 #define DK_ZONE_VERSION		1
 
@@ -123,6 +123,26 @@ struct dk_zone_report {
 	u_int32_t	dzr_entries_available;
 	struct dk_zone	*dzr_zones;
 	u_int64_t	dzr_reserved[8];
+};
+
+struct dk_zone_op {
+	u_int32_t	dzo_version;
+	u_int32_t	dzo_op;
+#define DK_ZONE_OP_CLOSE	0x01
+#define DK_ZONE_OP_FINISH	0x02
+#define DK_ZONE_OP_OPEN		0x03
+#define DK_ZONE_OP_RESET	0x04
+
+	/*
+	 * Absolute device LBA for the zone to operate on.  If
+	 * DK_ZONE_OP_F_ALL is set, dzo_lba must be zero and is ignored.
+	 */
+	u_int64_t	dzo_lba;
+
+	u_int64_t	dzo_flags;
+#define DK_ZONE_OP_F_ALL	0x00000001
+
+	u_int64_t	dzo_reserved[8];
 };
 
 #endif /* _SYS_DKZONE_H_ */

@@ -19,6 +19,7 @@
 #include "bio.h"
 
 #include <sys/param.h>
+#include <sys/fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/systm.h>
 #include <sys/buf.h>
@@ -102,8 +103,12 @@ int	nvme_zns_ioctl_zoneinfo(struct nvme_softc *, struct scsi_link *,
 	    struct dk_zone_info *);
 int	nvme_zns_ioctl_zonereport(struct nvme_softc *, struct scsi_link *,
 	    struct dk_zone_report *);
+int	nvme_zns_ioctl_zonecmd(struct nvme_softc *, struct scsi_link *,
+	    struct dk_zone_op *);
 int	nvme_zns_report_zones(struct nvme_softc *, struct scsi_link *,
 	    u_int64_t, u_int8_t, void *, u_int32_t);
+int	nvme_zns_zone_mgmt_send(struct nvme_softc *, struct scsi_link *,
+	    u_int64_t, u_int8_t, int);
 
 #ifdef HIBERNATE
 #include <uvm/uvm_extern.h>
@@ -1057,6 +1062,29 @@ nvme_zns_report_option(u_int32_t option, u_int8_t *zras)
 	return 0;
 }
 
+static int
+nvme_zns_zone_action(u_int32_t op, u_int8_t *zsa)
+{
+	switch (op) {
+	case DK_ZONE_OP_CLOSE:
+		*zsa = NVM_ZNS_ZSA_CLOSE;
+		break;
+	case DK_ZONE_OP_FINISH:
+		*zsa = NVM_ZNS_ZSA_FINISH;
+		break;
+	case DK_ZONE_OP_OPEN:
+		*zsa = NVM_ZNS_ZSA_OPEN;
+		break;
+	case DK_ZONE_OP_RESET:
+		*zsa = NVM_ZNS_ZSA_RESET;
+		break;
+	default:
+		return EINVAL;
+	}
+
+	return 0;
+}
+
 static u_int32_t
 nvme_zns_zone_type(u_int8_t type)
 {
@@ -1161,6 +1189,38 @@ nvme_zns_report_zones(struct nvme_softc *sc, struct scsi_link *link,
 		memcpy(buf, NVME_DMA_KVA(mem), buflen);
 
 	nvme_dmamem_free(sc, mem);
+	scsi_io_put(&sc->sc_iopool, ccb);
+
+	return rv == 0 ? 0 : EIO;
+}
+
+int
+nvme_zns_zone_mgmt_send(struct nvme_softc *sc, struct scsi_link *link,
+    u_int64_t start_lba, u_int8_t zsa, int all)
+{
+	struct nvme_sqe			 sqe;
+	struct nvme_ccb			*ccb;
+	u_int32_t			 cdw13;
+	int				 rv;
+
+	ccb = scsi_io_get(&sc->sc_iopool, 0);
+	KASSERT(ccb != NULL);
+
+	memset(&sqe, 0, sizeof(sqe));
+	sqe.opcode = NVM_CMD_ZONE_MGMT_SEND;
+	htolem32(&sqe.nsid, link->target);
+	htolem32(&sqe.cdw10, start_lba & 0xffffffff);
+	htolem32(&sqe.cdw11, start_lba >> 32);
+	cdw13 = NVM_ZNS_ZSA(zsa);
+	if (all)
+		SET(cdw13, NVM_ZNS_ZSA_SELECT_ALL);
+	htolem32(&sqe.cdw13, cdw13);
+
+	ccb->ccb_done = nvme_empty_done;
+	ccb->ccb_cookie = &sqe;
+
+	rv = nvme_poll(sc, sc->sc_q, ccb, nvme_sqe_fill, NVME_TIMO_PT);
+
 	scsi_io_put(&sc->sc_iopool, ccb);
 
 	return rv == 0 ? 0 : EIO;
@@ -1272,6 +1332,32 @@ done:
 }
 
 int
+nvme_zns_ioctl_zonecmd(struct nvme_softc *sc, struct scsi_link *link,
+    struct dk_zone_op *dzo)
+{
+	struct nvme_namespace		*ns = &sc->sc_namespaces[link->target];
+	u_int8_t			 zsa;
+	int				 all, error;
+
+	if (ns->ident == NULL || ns->zns == NULL)
+		return EOPNOTSUPP;
+	if (dzo->dzo_version != DK_ZONE_VERSION)
+		return EINVAL;
+	if (ISSET(dzo->dzo_flags, ~(u_int64_t)DK_ZONE_OP_F_ALL))
+		return EINVAL;
+
+	all = ISSET(dzo->dzo_flags, DK_ZONE_OP_F_ALL);
+	if (all && dzo->dzo_lba != 0)
+		return EINVAL;
+
+	error = nvme_zns_zone_action(dzo->dzo_op, &zsa);
+	if (error != 0)
+		return error;
+
+	return nvme_zns_zone_mgmt_send(sc, link, dzo->dzo_lba, zsa, all);
+}
+
+int
 nvme_passthrough_cmd(struct nvme_softc *sc, struct nvme_pt_cmd *pt, int dv_unit,
     int nsid)
 {
@@ -1361,6 +1447,14 @@ nvme_scsi_ioctl(struct scsi_link *link, u_long cmd, caddr_t addr, int flag)
 		rw_enter_write(&sc->sc_lock);
 		rv = nvme_zns_ioctl_zonereport(sc, link,
 		    (struct dk_zone_report *)addr);
+		rw_exit_write(&sc->sc_lock);
+		return rv;
+	case DIOCZONECMD:
+		if (!ISSET(flag, FWRITE))
+			return EBADF;
+		rw_enter_write(&sc->sc_lock);
+		rv = nvme_zns_ioctl_zonecmd(sc, link,
+		    (struct dk_zone_op *)addr);
 		rw_exit_write(&sc->sc_lock);
 		return rv;
 	case NVME_PASSTHROUGH_CMD:

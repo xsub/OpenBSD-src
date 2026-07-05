@@ -80,5 +80,6 @@ struct dk_diskmap {
 
 #define	DIOCGZONEINFO	_IOR('d', 121, struct dk_zone_info)
 #define	DIOCGZONEREPORT	_IOWR('d', 122, struct dk_zone_report)
+#define	DIOCZONECMD	_IOW('d', 123, struct dk_zone_op)
 
 #endif /* _SYS_DKIO_H_ */

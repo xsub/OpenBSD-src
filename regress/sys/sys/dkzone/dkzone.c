@@ -37,11 +37,14 @@ test_abi(void)
 {
 	struct dk_zone_info info = { 0 };
 	struct dk_zone_report report = { 0 };
+	struct dk_zone_op op = { 0 };
 	struct dk_zone zones[2] = { { 0 } };
 
 	if (DK_ZONE_VERSION != 1)
 		return __LINE__;
 	if (DIOCGZONEINFO == DIOCGZONEREPORT)
+		return __LINE__;
+	if (DIOCGZONEREPORT == DIOCZONECMD)
 		return __LINE__;
 	if (sizeof(info.dzi_flags) != sizeof(u_int64_t))
 		return __LINE__;
@@ -76,6 +79,16 @@ test_abi(void)
 	if (report.dzr_report_option != DK_ZONE_REP_ALL)
 		return __LINE__;
 
+	op.dzo_version = DK_ZONE_VERSION;
+	op.dzo_op = DK_ZONE_OP_RESET;
+	op.dzo_lba = zones[0].dz_start_lba;
+	op.dzo_flags = DK_ZONE_OP_F_ALL;
+
+	if (op.dzo_op != DK_ZONE_OP_RESET)
+		return __LINE__;
+	if ((op.dzo_flags & DK_ZONE_OP_F_ALL) == 0)
+		return __LINE__;
+
 	return 0;
 }
 
@@ -88,6 +101,8 @@ usage(void)
 {
 	fprintf(stderr,
 	    "usage: dkzone [-h] [-n entries] [-s start-lba] [device]\n");
+	fprintf(stderr,
+	    "       dkzone -m open|close|finish|reset [-a | -l lba] device\n");
 }
 
 static u_int64_t
@@ -196,6 +211,39 @@ zone_same_name(u_int32_t same)
 	}
 }
 
+static const char *
+zone_op_name(u_int32_t op)
+{
+	switch (op) {
+	case DK_ZONE_OP_CLOSE:
+		return "close";
+	case DK_ZONE_OP_FINISH:
+		return "finish";
+	case DK_ZONE_OP_OPEN:
+		return "open";
+	case DK_ZONE_OP_RESET:
+		return "reset";
+	default:
+		return "unknown";
+	}
+}
+
+static u_int32_t
+parse_zone_op(const char *arg)
+{
+	if (strcmp(arg, "close") == 0)
+		return DK_ZONE_OP_CLOSE;
+	if (strcmp(arg, "finish") == 0)
+		return DK_ZONE_OP_FINISH;
+	if (strcmp(arg, "open") == 0)
+		return DK_ZONE_OP_OPEN;
+	if (strcmp(arg, "reset") == 0)
+		return DK_ZONE_OP_RESET;
+
+	errx(1, "invalid zone command: %s", arg);
+	return 0;
+}
+
 static void
 print_zone(const struct dk_zone *zone, u_int index)
 {
@@ -286,15 +334,45 @@ test_device(const char *path, u_int64_t start_lba, u_int entries)
 	free(zones);
 	close(fd);
 }
+
+static void
+zone_command(const char *path, u_int32_t op, u_int64_t lba, int all)
+{
+	struct dk_zone_op dzo = { 0 };
+	int fd;
+
+	fd = open(path, O_RDWR);
+	if (fd == -1)
+		err(1, "open %s", path);
+
+	dzo.dzo_version = DK_ZONE_VERSION;
+	dzo.dzo_op = op;
+	dzo.dzo_lba = lba;
+	if (all)
+		dzo.dzo_flags = DK_ZONE_OP_F_ALL;
+
+	if (ioctl(fd, DIOCZONECMD, &dzo) == -1)
+		err(1, "DIOCZONECMD %s", path);
+
+	printf("zone_%s lba=%llu flags=0x%llx ok\n", zone_op_name(op),
+	    (unsigned long long)lba, (unsigned long long)dzo.dzo_flags);
+
+	close(fd);
+}
 #endif
 
 int
 main(int argc, char **argv)
 {
 #ifdef __OpenBSD__
+	const char *cmd = NULL;
 	u_int entries = DKZONE_DEFAULT_ENTRIES;
+	u_int32_t op = 0;
+	u_int64_t cmd_lba = 0;
 	u_int64_t start_lba = 0;
+	int all = 0;
 	int ch, had_args;
+	int have_lba = 0;
 #endif
 	int error;
 
@@ -308,11 +386,22 @@ main(int argc, char **argv)
 		usage();
 		return 0;
 	}
-	while ((ch = getopt(argc, argv, "hn:s:")) != -1) {
+	while ((ch = getopt(argc, argv, "ahl:m:n:s:")) != -1) {
 		switch (ch) {
+		case 'a':
+			all = 1;
+			break;
 		case 'h':
 			usage();
 			return 0;
+		case 'l':
+			cmd_lba = parse_u64(optarg, "zone command LBA");
+			have_lba = 1;
+			break;
+		case 'm':
+			cmd = optarg;
+			op = parse_zone_op(cmd);
+			break;
 		case 'n':
 			entries = parse_entries(optarg);
 			break;
@@ -327,7 +416,17 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	if (argc == 1)
+	if (cmd != NULL) {
+		if (argc != 1) {
+			usage();
+			return 1;
+		}
+		if (!all && !have_lba)
+			errx(1, "zone command requires -l lba unless -a is set");
+		if (all && have_lba && cmd_lba != 0)
+			errx(1, "-a requires omitted or zero -l lba");
+		zone_command(argv[0], op, cmd_lba, all);
+	} else if (argc == 1)
 		test_device(argv[0], start_lba, entries);
 	else if (had_args) {
 		usage();
