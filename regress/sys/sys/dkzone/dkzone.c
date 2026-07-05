@@ -108,8 +108,9 @@ usage(void)
 	    "[-s start-lba] [device]\n");
 	fprintf(stderr,
 	    "       dkzone -m open|close|finish|reset [-a | -l lba] device\n");
-	fprintf(stderr,
-	    "       dkzone -w [-s start-lba] device\n");
+	fprintf(stderr, "       dkzone -S [-s start-lba] device\n");
+	fprintf(stderr, "       dkzone -W [-s start-lba] device\n");
+	fprintf(stderr, "       dkzone -w [-s start-lba] device\n");
 	fprintf(stderr,
 	    "reports: all empty imp-open exp-open closed full readonly "
 	    "offline reset non-seq non-wp\n");
@@ -251,6 +252,25 @@ zone_report_name(u_int32_t option)
 		return "non-seq";
 	case DK_ZONE_REP_NON_WP:
 		return "non-wp";
+	default:
+		return "unknown";
+	}
+}
+
+static const char *
+errno_name(int error)
+{
+	switch (error) {
+	case EINVAL:
+		return "EINVAL";
+	case EIO:
+		return "EIO";
+	case ENOTTY:
+		return "ENOTTY";
+	case EOPNOTSUPP:
+		return "EOPNOTSUPP";
+	case EROFS:
+		return "EROFS";
 	default:
 		return "unknown";
 	}
@@ -452,14 +472,10 @@ test_device(const char *path, u_int64_t start_lba, u_int entries,
 }
 
 static void
-zone_command(const char *path, u_int32_t op, u_int64_t lba, int all)
+zone_command_fd(int fd, const char *path, u_int32_t op, u_int64_t lba,
+    int all)
 {
 	struct dk_zone_op dzo = { 0 };
-	int fd;
-
-	fd = open(path, O_RDWR);
-	if (fd == -1)
-		err(1, "open %s", path);
 
 	dzo.dzo_version = DK_ZONE_VERSION;
 	dzo.dzo_op = op;
@@ -472,27 +488,39 @@ zone_command(const char *path, u_int32_t op, u_int64_t lba, int all)
 
 	printf("zone_%s lba=%llu flags=0x%llx ok\n", zone_op_name(op),
 	    (unsigned long long)lba, (unsigned long long)dzo.dzo_flags);
-
-	close(fd);
 }
 
 static void
-write_probe(const char *path, u_int64_t lba)
+zone_command(const char *path, u_int32_t op, u_int64_t lba, int all)
 {
-	struct disklabel dl = { 0 };
-	unsigned char *buf;
-	u_int secsize = DKZONE_DEFAULT_SECSIZE;
-	u_int64_t offset64;
-	ssize_t n;
-	int error;
 	int fd;
 
 	fd = open(path, O_RDWR);
 	if (fd == -1)
 		err(1, "open %s", path);
 
+	zone_command_fd(fd, path, op, lba, all);
+	close(fd);
+}
+
+static u_int
+device_secsize(int fd)
+{
+	struct disklabel dl = { 0 };
+
 	if (ioctl(fd, DIOCGDINFO, &dl) != -1 && dl.d_secsize != 0)
-		secsize = dl.d_secsize;
+		return dl.d_secsize;
+
+	return DKZONE_DEFAULT_SECSIZE;
+}
+
+static ssize_t
+write_lba_fd(int fd, const char *path, u_int64_t lba, u_int secsize,
+    int *errorp)
+{
+	unsigned char *buf;
+	u_int64_t offset64;
+	ssize_t n;
 
 	if (lba > (u_int64_t)LLONG_MAX / secsize)
 		errx(1, "write probe LBA is too large");
@@ -501,19 +529,52 @@ write_probe(const char *path, u_int64_t lba)
 	buf = calloc(1, secsize);
 	if (buf == NULL)
 		err(1, "calloc");
+	memset(buf, 0xa5, secsize);
 
 	if (lseek(fd, (off_t)offset64, SEEK_SET) == -1)
 		err(1, "lseek %s", path);
 
 	n = write(fd, buf, secsize);
-	error = errno;
+	*errorp = errno;
 
 	free(buf);
+	return n;
+}
+
+static void
+write_probe(const char *path, u_int64_t lba, int expect_success)
+{
+	u_int secsize = DKZONE_DEFAULT_SECSIZE;
+	ssize_t n;
+	int error;
+	int fd;
+
+	fd = open(path, O_RDWR);
+	if (fd == -1)
+		err(1, "open %s", path);
+
+	secsize = device_secsize(fd);
+	n = write_lba_fd(fd, path, lba, secsize, &error);
 	close(fd);
 
-	if (n == -1 && error == EROFS) {
-		printf("ordinary_write lba=%llu error=EROFS ok\n",
-		    (unsigned long long)lba);
+	if (expect_success) {
+		if (n == (ssize_t)secsize) {
+			printf("sequential_write lba=%llu bytes=%u "
+			    "sectors=1 ok\n", (unsigned long long)lba,
+			    secsize);
+			return;
+		}
+		if (n == -1) {
+			errno = error;
+			err(1, "sequential write %s", path);
+		}
+		errx(1, "sequential write wrote %zd bytes, expected %u",
+		    n, secsize);
+	}
+
+	if (n == -1 && (error == EROFS || error == EINVAL)) {
+		printf("ordinary_write lba=%llu error=%s ok\n",
+		    (unsigned long long)lba, errno_name(error));
 		return;
 	}
 	if (n == -1) {
@@ -522,6 +583,102 @@ write_probe(const char *path, u_int64_t lba)
 	}
 
 	errx(1, "ordinary write unexpectedly wrote %zd bytes", n);
+}
+
+static void
+report_one_fd(int fd, const char *path, u_int64_t start_lba,
+    struct dk_zone *zone)
+{
+	struct dk_zone_report report = { 0 };
+
+	memset(zone, 0, sizeof(*zone));
+	report.dzr_version = DK_ZONE_VERSION;
+	report.dzr_report_option = DK_ZONE_REP_ALL;
+	report.dzr_start_lba = start_lba;
+	report.dzr_entries = 1;
+	report.dzr_zones = zone;
+
+	if (ioctl(fd, DIOCGZONEREPORT, &report) == -1)
+		err(1, "DIOCGZONEREPORT %s", path);
+	if (report.dzr_entries_filled != 1)
+		errx(1, "expected one zone descriptor, got %u",
+		    report.dzr_entries_filled);
+
+	printf("report_one start_lba=%llu wp_lba=%llu condition=%s\n",
+	    (unsigned long long)zone->dz_start_lba,
+	    (unsigned long long)zone->dz_write_pointer_lba,
+	    zone_condition_name(zone->dz_condition));
+}
+
+static void
+write_sequence_probe(const char *path, u_int64_t start_lba)
+{
+	struct dk_zone before, after;
+	u_int secsize;
+	u_int64_t expected_wp;
+	ssize_t n;
+	int error;
+	int fd;
+
+	fd = open(path, O_RDWR);
+	if (fd == -1)
+		err(1, "open %s", path);
+	secsize = device_secsize(fd);
+
+	printf("== reset zone before sequential write probe ==\n");
+	zone_command_fd(fd, path, DK_ZONE_OP_RESET, start_lba, 0);
+
+	printf("== report reset write pointer ==\n");
+	report_one_fd(fd, path, start_lba, &before);
+	if (before.dz_start_lba != start_lba)
+		errx(1, "expected first zone at %llu, got %llu",
+		    (unsigned long long)start_lba,
+		    (unsigned long long)before.dz_start_lba);
+	if (before.dz_write_pointer_lba != start_lba)
+		errx(1, "expected reset write pointer %llu, got %llu",
+		    (unsigned long long)start_lba,
+		    (unsigned long long)before.dz_write_pointer_lba);
+
+	printf("== write one sector at write pointer ==\n");
+	n = write_lba_fd(fd, path, before.dz_write_pointer_lba, secsize,
+	    &error);
+	if (n != (ssize_t)secsize) {
+		if (n == -1) {
+			errno = error;
+			err(1, "sequential write %s", path);
+		}
+		errx(1, "sequential write wrote %zd bytes, expected %u",
+		    n, secsize);
+	}
+	printf("sequential_write lba=%llu bytes=%u sectors=1 ok\n",
+	    (unsigned long long)before.dz_write_pointer_lba, secsize);
+
+	printf("== report advanced write pointer ==\n");
+	report_one_fd(fd, path, start_lba, &after);
+	if (before.dz_write_pointer_lba == DK_ZONE_WP_INVALID)
+		errx(1, "write pointer overflow");
+	expected_wp = before.dz_write_pointer_lba + 1;
+	if (after.dz_write_pointer_lba != expected_wp)
+		errx(1, "expected write pointer %llu after one-sector write, "
+		    "got %llu", (unsigned long long)expected_wp,
+		    (unsigned long long)after.dz_write_pointer_lba);
+
+	printf("== reject stale write below write pointer ==\n");
+	n = write_lba_fd(fd, path, start_lba, secsize, &error);
+	if (n == -1 && (error == EROFS || error == EINVAL))
+		printf("ordinary_write lba=%llu error=%s ok\n",
+		    (unsigned long long)start_lba, errno_name(error));
+	else if (n == -1) {
+		errno = error;
+		err(1, "ordinary write %s", path);
+	} else
+		errx(1, "ordinary write unexpectedly wrote %zd bytes", n);
+
+	printf("== reset zone after sequential write probe ==\n");
+	zone_command_fd(fd, path, DK_ZONE_OP_RESET, start_lba, 0);
+
+	close(fd);
+	printf("ok\n");
 }
 #endif
 
@@ -540,6 +697,8 @@ main(int argc, char **argv)
 	int have_lba = 0;
 	int have_report_option = 0;
 	int paginate = 0;
+	int write_sequence = 0;
+	int write_allow = 0;
 	int write_policy = 0;
 #endif
 	int error;
@@ -554,7 +713,7 @@ main(int argc, char **argv)
 		usage();
 		return 0;
 	}
-	while ((ch = getopt(argc, argv, "ahl:m:n:pr:s:w")) != -1) {
+	while ((ch = getopt(argc, argv, "ahl:m:n:pr:s:wWS")) != -1) {
 		switch (ch) {
 		case 'a':
 			all = 1;
@@ -586,6 +745,12 @@ main(int argc, char **argv)
 		case 'w':
 			write_policy = 1;
 			break;
+		case 'W':
+			write_allow = 1;
+			break;
+		case 'S':
+			write_sequence = 1;
+			break;
 		default:
 			usage();
 			return 1;
@@ -594,16 +759,22 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	if (write_policy) {
+	if (write_policy || write_allow || write_sequence) {
 		if (argc != 1) {
 			usage();
 			return 1;
 		}
+		if ((write_policy != 0) + (write_allow != 0) +
+		    (write_sequence != 0) > 1)
+			errx(1, "-S, -w, and -W cannot be combined");
 		if (cmd != NULL || all || have_lba || have_report_option ||
 		    paginate)
-			errx(1, "-w cannot be combined with -a, -l, -m, "
-			    "-p, or -r");
-		write_probe(argv[0], start_lba);
+			errx(1, "-S/-w/-W cannot be combined with -a, -l, "
+			    "-m, -p, or -r");
+		if (write_sequence)
+			write_sequence_probe(argv[0], start_lba);
+		else
+			write_probe(argv[0], start_lba, write_allow);
 	} else if (cmd != NULL) {
 		if (argc != 1) {
 			usage();

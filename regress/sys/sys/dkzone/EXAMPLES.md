@@ -26,7 +26,7 @@ cd /usr/src/regress/sys/sys/dkzone
 ./dkzone-vm-smoke.sh /dev/rsd1c 0
 ```
 
-Expected high-level coverage:
+Expected high-level coverage in the captured run below:
 
 - build and basic regress run
 - single-page zone report
@@ -36,6 +36,10 @@ Expected high-level coverage:
 - report filters for `empty` and `full`
 - finish/reset zone management
 - ordinary host-managed data write rejection with `EROFS`
+
+Newer runs may also include the `dkzone-write-seq.sh` section, which performs
+one successful raw write at the reported write pointer before probing stale
+write rejection.
 
 Example output:
 
