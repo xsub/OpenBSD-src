@@ -50,6 +50,10 @@ Tested so far:
   and multi-sector raw sequential writes.  The policy check verifies that
   writes fail without a fresh zone report and fail when they are not at the
   cached write pointer.
+- SCSI validation guardrails were checked in the same VM: the QEMU NVMe ZNS
+  disk is refused by `dkzone-scsi-zbc-smoke.sh` as NVMe-backed `sd(4)`, and
+  the normal VirtIO boot disk `/dev/rsd0c` is refused before build/mutation
+  because it is not marked `zoned` in `dmesg`.
 - The next cross-transport milestone is to run the same `dkzone-vm-smoke.sh`
   flow against a SCSI ZBC or host-managed SMR target.  The
   `dkzone-scsi-zbc-smoke.sh` wrapper prints target evidence, refuses
