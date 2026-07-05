@@ -21,6 +21,27 @@ section()
 	echo "== $* =="
 }
 
+disk_from_rawdev()
+{
+	disk=${1#/dev/r}
+	case "$disk" in
+	*[a-p])
+		disk=${disk%?}
+		;;
+	*)
+		die "raw device must include an OpenBSD partition letter"
+		;;
+	esac
+	case "$disk" in
+	sd[0-9]*)
+		echo "$disk"
+		;;
+	*)
+		die "SCSI ZBC smoke expects an sd(4) raw disk, got $1"
+		;;
+	esac
+}
+
 case $# in
 1)
 	dev=$1
@@ -52,16 +73,41 @@ esac
 cd "$(dirname "$0")"
 
 tmp=${TMPDIR:-/tmp}/dkzone-scsi-zbc-smoke.$$
+dmesg_tmp=${tmp}.dmesg
 cleanup()
 {
-	rm -f "$tmp"
+	rm -f "$tmp" "$dmesg_tmp"
 }
 trap cleanup 0 1 2 3 15
+
+disk=$(disk_from_rawdev "$dev")
 
 section "target evidence"
 uname -a || true
 sysctl hw.disknames || true
-dmesg | grep -E '^(scsibus|sd[0-9]|ses[0-9]|umass|uhub|mpi|mfi|mpt|mfii|ahci|nvme|vscsi|softraid)' || true
+dmesg >"$dmesg_tmp" || die "could not read dmesg"
+grep -E '^(scsibus|sd[0-9]|ses[0-9]|umass|uhub|mpi|mfi|mpt|mfii|ahci|nvme|vscsi|softraid)' "$dmesg_tmp" || true
+
+section "transport preflight"
+disk_line=$(grep "^${disk} at " "$dmesg_tmp" || true)
+[ -n "$disk_line" ] || die "could not find $disk attachment in dmesg"
+echo "$disk_line"
+case "$disk_line" in
+*'<NVMe,'*)
+	die "$dev is an NVMe-backed sd(4) disk; use dkzone-vm-smoke.sh for NVMe ZNS"
+	;;
+esac
+scsibus=$(echo "$disk_line" | sed -n 's/^.* at \(scsibus[0-9][0-9]*\) .*$/\1/p')
+[ -n "$scsibus" ] || die "could not identify scsibus for $disk"
+scsibus_line=$(grep "^${scsibus} at " "$dmesg_tmp" || true)
+[ -n "$scsibus_line" ] || die "could not find $scsibus attachment in dmesg"
+echo "$scsibus_line"
+case "$scsibus_line" in
+*" at nvme"*)
+	die "$dev is attached below nvme(4); this is not SCSI ZBC validation"
+	;;
+esac
+echo "non-NVMe sd(4) target evidence ok"
 
 section "build dkzone"
 ./dkzone-build.sh

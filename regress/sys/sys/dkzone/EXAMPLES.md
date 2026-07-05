@@ -62,9 +62,15 @@ cd /home/src/OpenBSD-src/regress/sys/sys/dkzone
 ```
 
 The wrapper prints `uname`, `hw.disknames`, and relevant attachment lines from
-`dmesg`, verifies that the raw disk reports host-managed `zone_mode=4`, and
-then runs `dkzone-vm-smoke.sh` unchanged.  A passing run should end with the
-same final `ok` as the NVMe ZNS transcript below.
+`dmesg`, refuses NVMe-backed `sd(4)` disks such as the QEMU ZNS VM disk,
+verifies that the raw disk reports host-managed `zone_mode=4`, and then runs
+`dkzone-vm-smoke.sh` unchanged.  A passing run should end with the same final
+`ok` as the NVMe ZNS transcript below.
+
+If the target evidence says `sdX ... <NVMe,...>` or `scsibusX at nvmeY`, the
+wrapper should stop and tell you to use `dkzone-vm-smoke.sh` instead.  That is
+not a failure of the ZNS path; it prevents an NVMe target from being recorded
+as SCSI ZBC validation.
 
 Example output:
 
