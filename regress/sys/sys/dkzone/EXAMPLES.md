@@ -15,7 +15,7 @@ Environment:
 - 64 MB zones
 - `zone_size_lba=131072`
 - 128 reported zones
-- OpenBSD 7.9-current-ZBD-dev kernel after the raw sequential write milestone
+- OpenBSD 7.9-current-ZBD-dev kernel after raw write path hardening
 
 Run:
 
@@ -24,6 +24,16 @@ cd /home/src/OpenBSD-src
 git pull --ff-only
 cd regress/sys/sys/dkzone
 ./dkzone-build.sh
+./dkzone-vm-smoke.sh /dev/rsd1c 0
+```
+
+The latest post-hardening VM checkpoint also ran the focused helpers before
+the full smoke:
+
+```sh
+./dkzone-build.sh
+./dkzone-write-seq.sh /dev/rsd1c 0
+./dkzone-write-policy.sh /dev/rsd1c 0
 ./dkzone-vm-smoke.sh /dev/rsd1c 0
 ```
 
@@ -43,8 +53,34 @@ Expected high-level coverage in the captured run below:
 Example output:
 
 ```text
-OpenBSD 7.9-current-ZBD-dev (GENERIC.MP) #0
-uname: OpenBSD varm.puffyclouds.click 7.9 GENERIC.MP#0-ZBD-dev arm64
+OpenBSD 7.9-current-ZBD-dev (GENERIC.MP) #1
+uname: OpenBSD varm.puffyclouds.click 7.9 GENERIC.MP#1-ZBD-dev arm64
+
+== focused sequential write helper ==
+== reset zone before sequential write probe ==
+zone_reset lba=0 flags=0x0 ok
+== report reset write pointer ==
+report_one start_lba=0 wp_lba=0 condition=empty
+== write one sector at write pointer ==
+sequential_write lba=0 bytes=512 sectors=1 ok
+== report advanced write pointer ==
+report_one start_lba=0 wp_lba=1 condition=implicit-open
+== reject stale write below write pointer ==
+ordinary_write lba=0 error=EINVAL ok
+== reset zone after sequential write probe ==
+zone_reset lba=0 flags=0x0 ok
+ok
+
+== focused write policy helper ==
+== reset zone before write-policy probe ==
+zone_reset lba=0 flags=0x0 ok
+== expect write at WP without report to fail ==
+ordinary_write lba=0 error=EROFS ok
+== expect stale/non-WP ordinary write to fail ==
+ordinary_write lba=1 error=EROFS ok
+== reset zone after write-policy probe ==
+zone_reset lba=0 flags=0x0 ok
+ok
 
 == build dkzone ==
 ==== run-regress-dkzone ====

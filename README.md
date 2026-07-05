@@ -44,6 +44,12 @@ Tested so far:
   protocol-dependent report filter handling, finish/reset zone management,
   one-sector sequential raw write at the reported write pointer, and bad-write
   rejection.
+- Post-hardening validation on the OpenBSD/arm64 VM with
+  `OpenBSD 7.9-current-ZBD-dev (GENERIC.MP) #1` passed
+  `dkzone-build.sh`, `dkzone-write-seq.sh`, `dkzone-write-policy.sh`, and
+  `dkzone-vm-smoke.sh /dev/rsd1c 0`.  The policy check verifies that writes
+  fail without a fresh zone report and fail when they are not at the cached
+  write pointer.
 - The next cross-transport milestone is to run the same `dkzone-vm-smoke.sh`
   flow against a SCSI ZBC or host-managed SMR target and compare behavior with
   the validated NVMe ZNS path.
