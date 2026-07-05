@@ -985,6 +985,10 @@ sdioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 		goto exit;
 
 	case DIOCGZONEREPORT:
+		if (part != RAW_PART) {
+			error = ENOTTY;
+			goto exit;
+		}
 		error = sd_ioctl_zonereport(sc, (struct dk_zone_report *)addr);
 		goto exit;
 

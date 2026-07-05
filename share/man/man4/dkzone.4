@@ -68,6 +68,8 @@ or active zones when the underlying protocol reports them.
 .It Dv DIOCGZONEREPORT Fa "struct dk_zone_report *"
 Read zone descriptors starting at
 .Fa dzr_start_lba .
+Zone reports use absolute device LBAs and must be issued to the raw disk
+partition.
 Before calling this operation, userland must set
 .Fa dzr_version
 to
