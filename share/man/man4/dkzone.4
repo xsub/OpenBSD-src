@@ -211,7 +211,8 @@ Host-managed zoned devices are exposed conservatively.
 The ordinary disk write path may reject writes unless the corresponding disk
 driver has zone-aware ordering and write-pointer checks.
 The current prototype only permits tightly bounded raw-partition writes that
-match a cached sequential-zone write pointer.
+match a sequential-zone write pointer cached from a fresh zone report.
+Zone management commands invalidate that cache.
 .Pp
 .Nm
 is an ioctl interface, not a user command or a standalone device node.

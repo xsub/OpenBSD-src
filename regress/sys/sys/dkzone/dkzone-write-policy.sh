@@ -68,6 +68,9 @@ echo "== reset zone before write-policy probe =="
 "$dkzone" -m reset -l "$start_lba" "$dev"
 cleanup=1
 
+echo "== expect write at WP without report to fail =="
+"$dkzone" -w -s "$start_lba" "$dev"
+
 bad_lba=$((start_lba + 1))
 
 echo "== expect stale/non-WP ordinary write to fail =="
