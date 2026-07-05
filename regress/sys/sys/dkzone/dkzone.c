@@ -679,7 +679,7 @@ write_sequence_probe(const char *path, u_int64_t start_lba, u_int sectors)
 	printf("== report advanced write pointer ==\n");
 	report_one_fd(fd, path, start_lba, &after);
 	if (before.dz_write_pointer_lba == DK_ZONE_WP_INVALID ||
-	    before.dz_write_pointer_lba > UINT64_MAX - sectors)
+	    sectors > DK_ZONE_WP_INVALID - before.dz_write_pointer_lba)
 		errx(1, "write pointer overflow");
 	expected_wp = before.dz_write_pointer_lba + sectors;
 	if (after.dz_write_pointer_lba != expected_wp)
