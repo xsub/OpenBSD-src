@@ -1295,8 +1295,12 @@ nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
 	if (dzr->dzr_entries > 0 && dzr->dzr_zones == NULL)
 		return EINVAL;
 
-	if (link->device_softc != NULL)
-		sd_zoned_cache_invalidate((struct sd_softc *)link->device_softc);
+	if (link->device_softc != NULL) {
+		if (sd_zoned_cache_busy((struct sd_softc *)link->device_softc))
+			return EBUSY;
+		sd_zoned_cache_invalidate(
+		    (struct sd_softc *)link->device_softc);
+	}
 
 	error = nvme_zns_report_option(dzr->dzr_report_option, &zras);
 	if (error != 0)
