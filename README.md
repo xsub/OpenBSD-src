@@ -50,13 +50,23 @@ Run:
 
 ```sh
 cd /usr/src/regress/sys/sys/dkzone
-make clean
-make obj
-make regress
+./dkzone-build.sh
 ./obj/dkzone /dev/rsd0c
 ./obj/dkzone -n 64 -s 0 /dev/rsd1c
 ./obj/dkzone -m reset -l 0 /dev/rsd1c
 ```
+
+For the QEMU ZNS test disk, the smoke helper rebuilds `dkzone` if needed,
+finishes the selected zone, verifies that it reports `full`, resets it, and
+verifies that it reports `empty` again:
+
+```sh
+cd /usr/src/regress/sys/sys/dkzone
+./dkzone-zns-smoke.sh /dev/rsd1c 0
+```
+
+`dkzone-zns-smoke.sh` mutates the target zone, so run it only against an
+explicit scratch raw device and pass a zone-start LBA.
 
 With a device argument, `dkzone` prints zone capability data and, for zoned
 devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
