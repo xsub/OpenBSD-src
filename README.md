@@ -11,9 +11,10 @@ This is research and bring-up work, not production-ready storage code.
 - Add a small native OpenBSD ABI for zoned block discovery.
 - Support read-only zone capability queries and zone reports first.
 - Add explicit zone management commands before ordinary host-managed writes.
-- Keep host-managed devices safe until write ordering is implemented.
+- Keep host-managed devices safe while adding tightly bounded sequential write
+  experiments.
 - Validate behavior with OpenBSD regress tests and QEMU-emulated zoned devices.
-- Build toward real host-managed write support only after the read-only path is stable.
+- Build toward ZLFS only after raw write-pointer behavior is proven end to end.
 
 ## Current Status
 
@@ -25,10 +26,11 @@ Implemented prototype pieces:
 - `DIOCZONECMD` for explicit open/close/finish/reset zone management
 - `sd(4)` recognition of SCSI ZBC host-managed devices
 - SCSI `REPORT ZONES` translation into OpenBSD `struct dk_zone`
-- ordinary-write rejection for host-managed zoned disks
+- non-WP write rejection for host-managed zoned disks
 - regression smoke test under `regress/sys/sys/dkzone`
 - initial NVMe ZNS reporting and zone management path
 - QEMU/OpenBSD VM validation workflow
+- experimental raw sequential write gate for one cached zone descriptor
 
 Tested so far:
 
@@ -39,8 +41,9 @@ Tested so far:
 - NVMe ZNS `DIOCGZONEINFO` and `DIOCGZONEREPORT` work in the VM.
 - `dkzone-vm-smoke.sh /dev/rsd1c 0` is the canonical QEMU ZNS VM test. It
   covers zone reports, header-only reports, paginated reports, report filters,
-  protocol-dependent report filter handling, finish/reset zone management, and
-  ordinary-write rejection with `EROFS`.
+  protocol-dependent report filter handling, finish/reset zone management,
+  one-sector sequential raw write at the reported write pointer, and bad-write
+  rejection.
 - The next cross-transport milestone is to run the same `dkzone-vm-smoke.sh`
   flow against a SCSI ZBC or host-managed SMR target and compare behavior with
   the validated NVMe ZNS path.
@@ -66,6 +69,7 @@ cd /usr/src/regress/sys/sys/dkzone
 ./obj/dkzone -m reset -l 0 /dev/rsd1c
 ./dkzone-report-filter.sh /dev/rsd1c 0
 ./dkzone-zone-management.sh /dev/rsd1c 0
+./dkzone-write-seq.sh /dev/rsd1c 0
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ```
 
@@ -74,7 +78,7 @@ the transport-neutral smoke flow to reuse for SCSI ZBC targets.  It rebuilds
 `dkzone`, checks a single report page, verifies the header-only `-n 0` report
 edge case, verifies paginated reporting, checks a protocol-dependent report
 filter, then runs the report filter, finish/reset zone management, and
-ordinary-write rejection smoke tests.
+sequential raw write and bad-write rejection smoke tests.
 See `regress/sys/sys/dkzone/EXAMPLES.md` for a captured VM output transcript.
 
 The zone-management helper rebuilds `dkzone` if needed, finishes the selected
@@ -95,9 +99,15 @@ zone, checking that `-r empty` returns it, finishing it, checking that `-r full`
 returns it, and resetting it again.
 
 `dkzone-write-policy.sh` verifies the conservative host-managed write policy:
-zone management through an `O_RDWR` open must work, while an ordinary data
-write must fail with `EROFS`.  It resets the selected test zone before and
-after the probe.
+zone management through an `O_RDWR` open must work, while a data write that is
+not at the current write pointer must fail.  It resets the selected test zone
+before and after the probe.
+
+`dkzone-write-seq.sh` verifies the first experimental write primitive through
+one `dkzone -S` process: reset the zone, report it to populate the kernel's
+cached zone descriptor, write one sector at the reported write pointer, report
+again and verify that the write pointer advanced by one LBA, reject a stale
+write below the new write pointer, then reset the zone.
 
 With a device argument, `dkzone` prints zone capability data and, for zoned
 devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
@@ -120,6 +130,13 @@ flags, and raw protocol values.
 The `-m` option issues an explicit zone management command.  Supported commands
 are `open`, `close`, `finish`, and `reset`.  Use `-l` for a single zone LBA or
 `-a` for the protocol's all-zones form.
+
+The `-S` option runs the full sequential write proof on one open raw device.
+The `-W` option writes one logical sector at `-s start-lba` and expects the
+write to succeed.  The kernel only allows writes on the raw partition when the
+target LBA matches the cached write pointer for the last reported sequential
+zone and the transfer fits within that zone.  The lowercase `-w` option probes
+the rejection path and expects the write to fail with `EROFS` or `EINVAL`.
 
 ## QEMU NVMe ZNS Target
 
@@ -155,8 +172,8 @@ cd /usr/src/regress/sys/sys/dkzone
 
 Replace `rsdXc` with the raw device attached by the SCSI ZBC target.  The
 expected coverage is the same as the QEMU ZNS run: report headers, descriptor
-translation, pagination, report filters, finish/reset zone management, and
-ordinary-write rejection.
+translation, pagination, report filters, finish/reset zone management,
+sequential raw write at the write pointer, and bad-write rejection.
 
 The Apple Silicon Homebrew QEMU 11.0.1 build used for the current VM exposes
 NVMe ZNS through `nvme-ns,zoned=on`, but its `scsi-hd` device does not advertise
@@ -172,14 +189,44 @@ that can present SCSI ZBC semantics.
 3. Validate the same smoke flow on SCSI ZBC or host-managed SMR hardware.
 4. Compare SCSI ZBC and NVMe ZNS edge cases for report filters, write-pointer
    normalization, and zone management errors.
-5. Add richer regress coverage for zone report layouts and option mapping.
-6. Design safe write-path semantics for host-managed sequential zones.
-7. Validate zone reset/open/close/finish operations on SCSI ZBC and NVMe ZNS.
-8. Evaluate filesystem and buffer-cache implications before enabling writable host-managed devices.
+5. Prove the raw sequential write primitive: reset, write at WP, report WP
+   advanced, reject stale/non-WP writes.
+6. Add richer regress coverage for zone report layouts and option mapping.
+7. Design safe write-path semantics for host-managed sequential zones.
+8. Validate zone reset/open/close/finish operations on SCSI ZBC and NVMe ZNS.
+9. Evaluate filesystem and buffer-cache implications before enabling general
+   writable host-managed devices.
+10. Start a ZLFS prototype only after the raw write-pointer contract is stable.
+
+## ZLFS Direction
+
+ZLFS is intentionally behind the raw write-pointer milestone.  The filesystem
+work should start only after the kernel and `dkzone-write-seq.sh` demonstrate:
+
+```text
+reset zone -> write exactly at WP -> report WP advanced -> reject stale write
+```
+
+The first ZLFS prototype should be userland-first:
+
+1. Define an append-only record format with magic, type, length, generation,
+   and checksum.
+2. Build `zbfs_mkfs`, `zbfs_dump`, and `zbfs_check` against a scratch zoned
+   raw device.
+3. Write checkpoint records sequentially instead of assuming that zone 0 is
+   conventional.
+4. Add tiny userland file write/read tools over data, inode, directory, and
+   checkpoint records.
+5. Move to a read-only kernel mount only after crash recovery and checkpoint
+   scanning are understandable in userland.
+6. Add single-writer append support, then fsync/checkpoint, then cleaner
+   policy.
+7. Integrate with VFS and buffer cache only after write ordering is explicit
+   and tested.
 
 ## Non-Goals For The Current Prototype
 
-- No production write support yet.
+- No production write support yet; only a one-zone raw sequential write probe.
 - No filesystem-level zoned allocation policy yet.
 - No promise of ABI stability before review.
 - No attempt to support drive-managed SMR specially; those already appear as normal disks.

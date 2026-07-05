@@ -51,6 +51,8 @@
 #define _SCSI_SDVAR_H
 
 #ifdef _KERNEL
+struct dk_zone;
+
 struct sd_softc {
 	struct device		sc_dev;
 	struct disk		sc_dk;
@@ -66,6 +68,14 @@ struct sd_softc {
 	u_int64_t		zone_optimal_seq_zones;
 	u_int64_t		zone_optimal_nonseq_zones;
 	u_int64_t		zone_max_seq_zones;
+	u_int64_t		zone_size_lba;
+	int			zone_cache_valid;
+	u_int32_t		zone_cache_type;
+	u_int32_t		zone_cache_condition;
+	u_int64_t		zone_cache_start_lba;
+	u_int64_t		zone_cache_length_lba;
+	u_int64_t		zone_cache_capacity_lba;
+	u_int64_t		zone_cache_wp_lba;
 	struct disk_parms {
 		u_int32_t	heads;		/* number of heads */
 		u_int32_t	cyls;		/* number of cylinders */
@@ -78,5 +88,8 @@ struct sd_softc {
 
 	struct scsi_xshandler sc_xsh;
 };
+
+void	sd_zoned_cache_update(struct sd_softc *, const struct dk_zone *);
+void	sd_zoned_cache_invalidate(struct sd_softc *);
 #endif /* _KERNEL */
 #endif /* _SCSI_SDVAR_H */

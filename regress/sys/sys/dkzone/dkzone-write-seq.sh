@@ -5,7 +5,7 @@ usage()
 {
 	echo "usage: $0 raw-device [start-lba]" >&2
 	echo "example: $0 /dev/rsd1c 0" >&2
-	echo "warning: this resets the target zone and probes a bad write" >&2
+	echo "warning: this resets the target zone and writes one sector" >&2
 	exit 1
 }
 
@@ -64,17 +64,6 @@ cleanup_zone()
 
 trap cleanup_zone 0 1 2 3 15
 
-echo "== reset zone before write-policy probe =="
-"$dkzone" -m reset -l "$start_lba" "$dev"
 cleanup=1
-
-bad_lba=$((start_lba + 1))
-
-echo "== expect stale/non-WP ordinary write to fail =="
-"$dkzone" -w -s "$bad_lba" "$dev"
-
-echo "== reset zone after write-policy probe =="
-"$dkzone" -m reset -l "$start_lba" "$dev"
+"$dkzone" -S -s "$start_lba" "$dev"
 cleanup=0
-
-echo "ok"

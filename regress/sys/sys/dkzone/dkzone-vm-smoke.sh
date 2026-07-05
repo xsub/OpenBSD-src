@@ -116,6 +116,9 @@ section "report filters"
 section "zone management"
 ./dkzone-zone-management.sh "$dev" "$start_lba"
 
+section "sequential raw write"
+./dkzone-write-seq.sh "$dev" "$start_lba"
+
 section "write policy"
 ./dkzone-write-policy.sh "$dev" "$start_lba"
 

@@ -1260,6 +1260,9 @@ nvme_zns_ioctl_zoneinfo(struct nvme_softc *sc, struct scsi_link *link,
 	dzi->dzi_zone_size_lba = lemtoh64(&zns->lbafe[flbas].zsze);
 	dzi->dzi_max_open_zones = nvme_zns_resource(lemtoh32(&zns->mor));
 	dzi->dzi_max_active_zones = nvme_zns_resource(lemtoh32(&zns->mar));
+	if (link->device_softc != NULL)
+		((struct sd_softc *)link->device_softc)->zone_size_lba =
+		    dzi->dzi_zone_size_lba;
 
 	return 0;
 }
@@ -1333,6 +1336,9 @@ nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
 		error = copyout(&zone, &dzr->dzr_zones[i], sizeof(zone));
 		if (error != 0)
 			break;
+		if (i == 0 && link->device_softc != NULL)
+			sd_zoned_cache_update(
+			    (struct sd_softc *)link->device_softc, &zone);
 	}
 
 done:
