@@ -114,7 +114,7 @@ section "report filters"
 ./dkzone-report-filter.sh "$dev" "$start_lba"
 
 section "zone management"
-./dkzone-zns-smoke.sh "$dev" "$start_lba"
+./dkzone-zone-management.sh "$dev" "$start_lba"
 
 section "write policy"
 ./dkzone-write-policy.sh "$dev" "$start_lba"
