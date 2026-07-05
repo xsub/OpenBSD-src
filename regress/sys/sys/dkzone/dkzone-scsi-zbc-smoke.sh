@@ -107,7 +107,17 @@ case "$scsibus_line" in
 	die "$dev is attached below nvme(4); this is not SCSI ZBC validation"
 	;;
 esac
-echo "non-NVMe sd(4) target evidence ok"
+disk_size_line=$(grep "^${disk}: " "$dmesg_tmp" | head -n 1 || true)
+[ -n "$disk_size_line" ] || die "could not find $disk capacity line in dmesg"
+echo "$disk_size_line"
+case "$disk_size_line" in
+*zoned*)
+	echo "zoned non-NVMe sd(4) target evidence ok"
+	;;
+*)
+	die "$dev is not marked zoned in dmesg"
+	;;
+esac
 
 section "build dkzone"
 ./dkzone-build.sh

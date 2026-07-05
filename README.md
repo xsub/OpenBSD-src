@@ -130,11 +130,12 @@ while that write is pending.
 `dkzone-scsi-zbc-smoke.sh` is the second-transport validation wrapper.  It is
 intended for a real SCSI ZBC or host-managed SMR target exposed as an OpenBSD
 raw disk.  It prints `uname`, `hw.disknames`, and relevant `dmesg` attachment
-lines, refuses NVMe-backed `sd(4)` disks so they are not counted as
-second-transport validation, verifies that the target reports host-managed
-`zone_mode=4`, and then runs `dkzone-vm-smoke.sh` unchanged.  A passing run is
-the evidence that the ABI and userland behavior are transport-neutral while the
-kernel handles SCSI ZBC and NVMe ZNS differences internally.
+lines, refuses NVMe-backed `sd(4)` disks and disks not marked `zoned` in
+`dmesg` so they are not counted as second-transport validation, verifies that
+the target reports host-managed `zone_mode=4`, and then runs
+`dkzone-vm-smoke.sh` unchanged.  A passing run is the evidence that the ABI and
+userland behavior are transport-neutral while the kernel handles SCSI ZBC and
+NVMe ZNS differences internally.
 
 With a device argument, `dkzone` prints zone capability data and, for zoned
 devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
@@ -200,11 +201,13 @@ cd /usr/src/regress/sys/sys/dkzone
 Replace `rsdXc` with the raw device attached by the SCSI ZBC target.  The
 wrapper first records target evidence and rejects NVMe-backed `sd(4)` devices
 such as the QEMU ZNS VM disk, because those should keep using
-`dkzone-vm-smoke.sh`.  On a non-NVMe `sd(4)` target it confirms host-managed
-`zone_mode=4`, then runs the same canonical smoke as the QEMU ZNS path.
-Expected coverage is the same as the QEMU ZNS run: report headers, descriptor
-translation, pagination, report filters, finish/reset zone management,
-sequential raw write at the write pointer, and bad-write rejection.
+`dkzone-vm-smoke.sh`.  It also rejects ordinary non-zoned `sd(4)` disks before
+running mutating tests.  On a non-NVMe `sd(4)` target marked `zoned`, it
+confirms host-managed `zone_mode=4`, then runs the same canonical smoke as the
+QEMU ZNS path.  Expected coverage is the same as the QEMU ZNS run: report
+headers, descriptor translation, pagination, report filters, finish/reset zone
+management, sequential raw write at the write pointer, and bad-write
+rejection.
 
 The Apple Silicon Homebrew QEMU 11.0.1 build used for the current VM exposes
 NVMe ZNS through `nvme-ns,zoned=on`, but its `scsi-hd` device does not advertise
