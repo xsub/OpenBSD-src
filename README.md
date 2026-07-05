@@ -41,6 +41,9 @@ Tested so far:
   covers zone reports, header-only reports, paginated reports, report filters,
   protocol-dependent report filter handling, finish/reset zone management, and
   ordinary-write rejection with `EROFS`.
+- The next cross-transport milestone is to run the same `dkzone-vm-smoke.sh`
+  flow against a SCSI ZBC or host-managed SMR target and compare behavior with
+  the validated NVMe ZNS path.
 
 ## Test Helper
 
@@ -65,11 +68,12 @@ cd /usr/src/regress/sys/sys/dkzone
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ```
 
-`dkzone-vm-smoke.sh /dev/rsd1c 0` is the canonical QEMU ZNS VM smoke test.  It
-rebuilds `dkzone`, checks a single report page, verifies the header-only
-`-n 0` report edge case, verifies paginated reporting, checks a
-protocol-dependent report filter, then runs the report filter, finish/reset
-zone management, and ordinary-write rejection smoke tests.
+`dkzone-vm-smoke.sh /dev/rsd1c 0` is the canonical QEMU ZNS VM smoke test and
+the transport-neutral smoke flow to reuse for SCSI ZBC targets.  It rebuilds
+`dkzone`, checks a single report page, verifies the header-only `-n 0` report
+edge case, verifies paginated reporting, checks a protocol-dependent report
+filter, then runs the report filter, finish/reset zone management, and
+ordinary-write rejection smoke tests.
 
 For the QEMU ZNS test disk, the smoke helper rebuilds `dkzone` if needed,
 finishes the selected zone, verifies that it reports `full`, resets it, and
@@ -135,15 +139,40 @@ dmesg | grep -E 'nvme|sd[0-9]'
 sysctl hw.disknames
 ```
 
+## SCSI ZBC Validation Target
+
+The next milestone is to run the same smoke suite on the SCSI ZBC path in
+`sd(4)`.  A successful run should use the raw disk device for the SCSI ZBC or
+host-managed SMR target:
+
+```sh
+cd /usr/src/regress/sys/sys/dkzone
+./dkzone-vm-smoke.sh /dev/rsdXc 0
+```
+
+Replace `rsdXc` with the raw device attached by the SCSI ZBC target.  The
+expected coverage is the same as the QEMU ZNS run: report headers, descriptor
+translation, pagination, report filters, finish/reset zone management, and
+ordinary-write rejection.
+
+The Apple Silicon Homebrew QEMU 11.0.1 build used for the current VM exposes
+NVMe ZNS through `nvme-ns,zoned=on`, but its `scsi-hd` device does not advertise
+zoned options and `scsi-block` is not available.  On that host, an emulated
+SCSI ZBC raw-file target is therefore not a drop-in equivalent to the NVMe ZNS
+test disk; use a real ZBC/host-managed SMR device or a different host setup
+that can present SCSI ZBC semantics.
+
 ## Roadmap
 
 1. Stabilize reporting and management ABI.
-2. Validate SCSI ZBC host-managed reporting against real or emulated devices.
-3. Validate NVMe ZNS reporting under QEMU.
-4. Add richer regress coverage for zone report layouts and option mapping.
-5. Design safe write-path semantics for host-managed sequential zones.
-6. Validate zone reset/open/close/finish operations on SCSI ZBC and NVMe ZNS.
-7. Evaluate filesystem and buffer-cache implications before enabling writable host-managed devices.
+2. Keep QEMU NVMe ZNS as the canonical VM regression target.
+3. Validate the same smoke flow on SCSI ZBC or host-managed SMR hardware.
+4. Compare SCSI ZBC and NVMe ZNS edge cases for report filters, write-pointer
+   normalization, and zone management errors.
+5. Add richer regress coverage for zone report layouts and option mapping.
+6. Design safe write-path semantics for host-managed sequential zones.
+7. Validate zone reset/open/close/finish operations on SCSI ZBC and NVMe ZNS.
+8. Evaluate filesystem and buffer-cache implications before enabling writable host-managed devices.
 
 ## Non-Goals For The Current Prototype
 
@@ -167,4 +196,3 @@ must preserve sequential-write rules before it can be enabled safely.
 - libzbc
 - libzbd
 - QEMU NVMe ZNS emulation
-```
