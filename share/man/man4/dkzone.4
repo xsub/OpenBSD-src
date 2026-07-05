@@ -184,6 +184,9 @@ The ABI version, unknown report option, command option, flags, or output
 pointer is invalid.
 .It Bq Er EBADF
 A zone management command was attempted without opening the device for writing.
+.It Bq Er EBUSY
+A zone report or zone management command was attempted while an experimental
+raw zoned write was pending.
 .It Bq Er EOPNOTSUPP
 The disk or driver does not support the requested zoned operation.
 .It Bq Er ENOTTY
@@ -213,6 +216,7 @@ driver has zone-aware ordering and write-pointer checks.
 The current prototype only permits tightly bounded raw-partition writes that
 match a sequential-zone write pointer cached from a fresh zone report.
 Zone management commands invalidate that cache.
+Only one experimental raw zoned write may be in flight at a time.
 .Pp
 .Nm
 is an ioctl interface, not a user command or a standalone device node.

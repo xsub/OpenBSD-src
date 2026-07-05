@@ -110,7 +110,7 @@ int	sd_zbc_report_zones(struct sd_softc *, u_int64_t, u_int8_t, void *,
 int	sd_zbc_zone_cmd(struct sd_softc *, u_int64_t, u_int8_t, int, int);
 int	sd_zoned_buf_lba(struct sd_softc *, struct buf *, u_int64_t *,
 	    u_int64_t *);
-int	sd_zoned_write_validate(struct sd_softc *, struct buf *);
+int	sd_zoned_write_prepare(struct sd_softc *, struct buf *);
 void	sd_zoned_write_done(struct sd_softc *, struct buf *);
 
 int	sd_cmd_rw6(struct scsi_generic *, int, u_int64_t, u_int32_t);
@@ -574,7 +574,7 @@ sdstrategy(struct buf *bp)
 
 	if (sc->zone_mode == DK_ZONE_MODE_HOST_MANAGED &&
 	    !ISSET(bp->b_flags, B_READ)) {
-		error = sd_zoned_write_validate(sc, bp);
+		error = sd_zoned_write_prepare(sc, bp);
 		if (error != 0) {
 			bp->b_error = error;
 			goto bad;
@@ -864,12 +864,21 @@ void
 sd_zoned_cache_invalidate(struct sd_softc *sc)
 {
 	sc->zone_cache_valid = 0;
+	sc->zone_cache_busy = 0;
 	sc->zone_cache_type = DK_ZONE_TYPE_UNKNOWN;
 	sc->zone_cache_condition = DK_ZONE_COND_UNKNOWN;
 	sc->zone_cache_start_lba = 0;
 	sc->zone_cache_length_lba = 0;
 	sc->zone_cache_capacity_lba = 0;
 	sc->zone_cache_wp_lba = 0;
+	sc->zone_cache_busy_lba = 0;
+	sc->zone_cache_busy_nsecs = 0;
+}
+
+int
+sd_zoned_cache_busy(struct sd_softc *sc)
+{
+	return sc->zone_cache_busy;
 }
 
 void
@@ -909,6 +918,9 @@ sd_zoned_cache_update(struct sd_softc *sc, const struct dk_zone *zone)
 	sc->zone_cache_length_lba = zone->dz_length_lba;
 	sc->zone_cache_capacity_lba = zone->dz_capacity_lba;
 	sc->zone_cache_wp_lba = zone->dz_write_pointer_lba;
+	sc->zone_cache_busy = 0;
+	sc->zone_cache_busy_lba = 0;
+	sc->zone_cache_busy_nsecs = 0;
 }
 
 int
@@ -940,7 +952,7 @@ sd_zoned_buf_lba(struct sd_softc *sc, struct buf *bp, u_int64_t *secno,
 }
 
 int
-sd_zoned_write_validate(struct sd_softc *sc, struct buf *bp)
+sd_zoned_write_prepare(struct sd_softc *sc, struct buf *bp)
 {
 	u_int64_t	secno, nsecs, zone_off, zone_space;
 	int		error;
@@ -954,6 +966,8 @@ sd_zoned_write_validate(struct sd_softc *sc, struct buf *bp)
 	if (nsecs == 0)
 		return 0;
 
+	if (sc->zone_cache_busy)
+		return EBUSY;
 	if (!sc->zone_cache_valid)
 		return EROFS;
 	if (sc->zone_cache_type != DK_ZONE_TYPE_SEQ_REQUIRED &&
@@ -981,6 +995,10 @@ sd_zoned_write_validate(struct sd_softc *sc, struct buf *bp)
 	if (nsecs > zone_space)
 		return EINVAL;
 
+	sc->zone_cache_busy = 1;
+	sc->zone_cache_busy_lba = secno;
+	sc->zone_cache_busy_nsecs = nsecs;
+
 	return 0;
 }
 
@@ -995,6 +1013,12 @@ sd_zoned_write_done(struct sd_softc *sc, struct buf *bp)
 	}
 	if (nsecs == 0)
 		return;
+	if (!sc->zone_cache_busy ||
+	    secno != sc->zone_cache_busy_lba ||
+	    nsecs != sc->zone_cache_busy_nsecs) {
+		sd_zoned_cache_invalidate(sc);
+		return;
+	}
 	if (!sc->zone_cache_valid || secno != sc->zone_cache_wp_lba) {
 		sd_zoned_cache_invalidate(sc);
 		return;
@@ -1008,6 +1032,9 @@ sd_zoned_write_done(struct sd_softc *sc, struct buf *bp)
 
 	sc->zone_cache_wp_lba += nsecs;
 	sc->zone_cache_condition = DK_ZONE_COND_IMPLICIT_OPEN;
+	sc->zone_cache_busy = 0;
+	sc->zone_cache_busy_lba = 0;
+	sc->zone_cache_busy_nsecs = 0;
 
 	zone_end = sc->zone_cache_start_lba + sc->zone_cache_capacity_lba;
 	if (sc->zone_cache_wp_lba > zone_end) {
@@ -1604,6 +1631,8 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 		return EINVAL;
 	if (dzr->dzr_entries > 0 && dzr->dzr_zones == NULL)
 		return EINVAL;
+	if (sd_zoned_cache_busy(sc))
+		return EBUSY;
 
 	sd_zoned_cache_invalidate(sc);
 
@@ -1667,6 +1696,9 @@ sd_ioctl_zonecmd(struct sd_softc *sc, struct dk_zone_op *dzo, int flags)
 	if (ISSET(sc->flags, SDF_DYING))
 		return ENXIO;
 	link = sc->sc_link;
+
+	if (sd_zoned_cache_busy(sc))
+		return EBUSY;
 
 	error = scsi_do_ioctl(link, DIOCZONECMD, (caddr_t)dzo, flags);
 	if (error != ENOTTY) {

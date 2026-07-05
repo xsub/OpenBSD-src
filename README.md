@@ -108,6 +108,9 @@ one `dkzone -S` process: reset the zone, report it to populate the kernel's
 cached zone descriptor, write one sector at the reported write pointer, report
 again and verify that the write pointer advanced by one LBA, reject a stale
 write below the new write pointer, then reset the zone.
+The prototype permits only one in-flight raw zoned write against the cached
+descriptor; concurrent report or zone-management operations return `EBUSY`
+while that write is pending.
 
 With a device argument, `dkzone` prints zone capability data and, for zoned
 devices, a diagnostic table of reported zone descriptors.  The `-n` option sets
