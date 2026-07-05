@@ -37,6 +37,9 @@ Tested so far:
 - Kernel boots on OpenBSD/arm64 VM.
 - QEMU NVMe ZNS attaches as an `sd(4)` disk marked `zoned`.
 - NVMe ZNS `DIOCGZONEINFO` and `DIOCGZONEREPORT` work in the VM.
+- `dkzone-vm-smoke.sh /dev/rsd1c 0` is the canonical QEMU ZNS VM test. It
+  covers zone reports, paginated reports, report filters, finish/reset zone
+  management, and ordinary-write rejection with `EROFS`.
 
 ## Test Helper
 
@@ -61,9 +64,10 @@ cd /usr/src/regress/sys/sys/dkzone
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ```
 
-`dkzone-vm-smoke.sh` is the one-shot VM smoke runner.  It rebuilds `dkzone`,
-checks a single report page, verifies paginated reporting, then runs the report
-filter, zone management, and write-policy smoke tests.
+`dkzone-vm-smoke.sh /dev/rsd1c 0` is the canonical QEMU ZNS VM smoke test.  It
+rebuilds `dkzone`, checks a single report page, verifies paginated reporting,
+then runs the report filter, finish/reset zone management, and ordinary-write
+rejection smoke tests.
 
 For the QEMU ZNS test disk, the smoke helper rebuilds `dkzone` if needed,
 finishes the selected zone, verifies that it reports `full`, resets it, and
