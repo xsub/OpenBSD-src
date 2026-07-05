@@ -112,9 +112,6 @@ int	sd_zoned_buf_lba(struct sd_softc *, struct buf *, u_int64_t *,
 	    u_int64_t *);
 int	sd_zoned_write_validate(struct sd_softc *, struct buf *);
 void	sd_zoned_write_done(struct sd_softc *, struct buf *);
-void	sd_zoned_zonecmd_done(struct sd_softc *, struct dk_zone_op *);
-void	sd_zoned_cache_update(struct sd_softc *, const struct dk_zone *);
-void	sd_zoned_cache_invalidate(struct sd_softc *);
 
 int	sd_cmd_rw6(struct scsi_generic *, int, u_int64_t, u_int32_t);
 int	sd_cmd_rw10(struct scsi_generic *, int, u_int64_t, u_int32_t);
@@ -885,6 +882,25 @@ sd_zoned_cache_update(struct sd_softc *sc, const struct dk_zone *zone)
 		sd_zoned_cache_invalidate(sc);
 		return;
 	}
+	if (zone->dz_type != DK_ZONE_TYPE_SEQ_REQUIRED &&
+	    zone->dz_type != DK_ZONE_TYPE_SEQ_PREFERRED) {
+		sd_zoned_cache_invalidate(sc);
+		return;
+	}
+	if (zone->dz_condition != DK_ZONE_COND_EMPTY &&
+	    zone->dz_condition != DK_ZONE_COND_IMPLICIT_OPEN &&
+	    zone->dz_condition != DK_ZONE_COND_EXPLICIT_OPEN &&
+	    zone->dz_condition != DK_ZONE_COND_CLOSED) {
+		sd_zoned_cache_invalidate(sc);
+		return;
+	}
+	if (zone->dz_start_lba > UINT64_MAX - zone->dz_capacity_lba ||
+	    zone->dz_write_pointer_lba < zone->dz_start_lba ||
+	    zone->dz_write_pointer_lba >
+	    zone->dz_start_lba + zone->dz_capacity_lba) {
+		sd_zoned_cache_invalidate(sc);
+		return;
+	}
 
 	sc->zone_cache_valid = 1;
 	sc->zone_cache_type = zone->dz_type;
@@ -947,6 +963,11 @@ sd_zoned_write_validate(struct sd_softc *sc, struct buf *bp)
 	    sc->zone_cache_condition == DK_ZONE_COND_OFFLINE ||
 	    sc->zone_cache_condition == DK_ZONE_COND_FULL)
 		return EROFS;
+	if (sc->zone_cache_condition != DK_ZONE_COND_EMPTY &&
+	    sc->zone_cache_condition != DK_ZONE_COND_IMPLICIT_OPEN &&
+	    sc->zone_cache_condition != DK_ZONE_COND_EXPLICIT_OPEN &&
+	    sc->zone_cache_condition != DK_ZONE_COND_CLOSED)
+		return EROFS;
 
 	if (secno != sc->zone_cache_wp_lba)
 		return EINVAL;
@@ -972,6 +993,8 @@ sd_zoned_write_done(struct sd_softc *sc, struct buf *bp)
 		sd_zoned_cache_invalidate(sc);
 		return;
 	}
+	if (nsecs == 0)
+		return;
 	if (!sc->zone_cache_valid || secno != sc->zone_cache_wp_lba) {
 		sd_zoned_cache_invalidate(sc);
 		return;
@@ -987,60 +1010,23 @@ sd_zoned_write_done(struct sd_softc *sc, struct buf *bp)
 	sc->zone_cache_condition = DK_ZONE_COND_IMPLICIT_OPEN;
 
 	zone_end = sc->zone_cache_start_lba + sc->zone_cache_capacity_lba;
-	if (sc->zone_cache_wp_lba >= zone_end)
+	if (sc->zone_cache_wp_lba > zone_end) {
+		sd_zoned_cache_invalidate(sc);
+		return;
+	}
+	if (sc->zone_cache_wp_lba == zone_end)
 		sc->zone_cache_condition = DK_ZONE_COND_FULL;
 }
 
 void
-sd_zoned_zonecmd_done(struct sd_softc *sc, struct dk_zone_op *dzo)
+sd_zoned_zonecmd_done(struct sd_softc *sc)
 {
-	if (ISSET(dzo->dzo_flags, DK_ZONE_OP_F_ALL)) {
-		sd_zoned_cache_invalidate(sc);
-		return;
-	}
-
-	switch (dzo->dzo_op) {
-	case DK_ZONE_OP_RESET:
-		if (sc->zone_size_lba == 0) {
-			sd_zoned_cache_invalidate(sc);
-			return;
-		}
-		sc->zone_cache_valid = 1;
-		sc->zone_cache_type = DK_ZONE_TYPE_SEQ_REQUIRED;
-		sc->zone_cache_condition = DK_ZONE_COND_EMPTY;
-		sc->zone_cache_start_lba = dzo->dzo_lba;
-		sc->zone_cache_length_lba = sc->zone_size_lba;
-		sc->zone_cache_capacity_lba = sc->zone_size_lba;
-		sc->zone_cache_wp_lba = dzo->dzo_lba;
-		break;
-	case DK_ZONE_OP_FINISH:
-		if (sc->zone_cache_valid &&
-		    dzo->dzo_lba == sc->zone_cache_start_lba) {
-			sc->zone_cache_wp_lba = sc->zone_cache_start_lba +
-			    sc->zone_cache_capacity_lba;
-			sc->zone_cache_condition = DK_ZONE_COND_FULL;
-		} else
-			sd_zoned_cache_invalidate(sc);
-		break;
-	case DK_ZONE_OP_OPEN:
-		if (sc->zone_cache_valid &&
-		    dzo->dzo_lba == sc->zone_cache_start_lba)
-			sc->zone_cache_condition =
-			    DK_ZONE_COND_EXPLICIT_OPEN;
-		else
-			sd_zoned_cache_invalidate(sc);
-		break;
-	case DK_ZONE_OP_CLOSE:
-		if (sc->zone_cache_valid &&
-		    dzo->dzo_lba == sc->zone_cache_start_lba)
-			sc->zone_cache_condition = DK_ZONE_COND_CLOSED;
-		else
-			sd_zoned_cache_invalidate(sc);
-		break;
-	default:
-		sd_zoned_cache_invalidate(sc);
-		break;
-	}
+	/*
+	 * Zone management can change write pointers and capacity semantics in
+	 * protocol-specific ways.  Require a fresh zone report before allowing
+	 * another experimental raw sequential write.
+	 */
+	sd_zoned_cache_invalidate(sc);
 }
 
 /*
@@ -1619,6 +1605,8 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 	if (dzr->dzr_entries > 0 && dzr->dzr_zones == NULL)
 		return EINVAL;
 
+	sd_zoned_cache_invalidate(sc);
+
 	error = sd_zbc_report_option(dzr->dzr_report_option, &zbc_option);
 	if (error != 0)
 		return error;
@@ -1683,7 +1671,7 @@ sd_ioctl_zonecmd(struct sd_softc *sc, struct dk_zone_op *dzo, int flags)
 	error = scsi_do_ioctl(link, DIOCZONECMD, (caddr_t)dzo, flags);
 	if (error != ENOTTY) {
 		if (error == 0)
-			sd_zoned_zonecmd_done(sc, dzo);
+			sd_zoned_zonecmd_done(sc);
 		return error;
 	}
 
@@ -1723,7 +1711,7 @@ sd_ioctl_zonecmd(struct sd_softc *sc, struct dk_zone_op *dzo, int flags)
 
 	error = sd_zbc_zone_cmd(sc, dzo->dzo_lba, service_action, all, 0);
 	if (error == 0)
-		sd_zoned_zonecmd_done(sc, dzo);
+		sd_zoned_zonecmd_done(sc);
 
 	return error;
 }
