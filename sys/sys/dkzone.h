@@ -61,6 +61,7 @@ struct dk_zone {
 	u_int64_t	dz_length_lba;
 	u_int64_t	dz_capacity_lba;
 	u_int64_t	dz_write_pointer_lba;
+#define DK_ZONE_WP_INVALID		((u_int64_t)-1)
 
 	u_int32_t	dz_type;
 #define DK_ZONE_TYPE_UNKNOWN		0x00

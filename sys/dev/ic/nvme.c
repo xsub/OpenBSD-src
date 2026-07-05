@@ -1135,6 +1135,11 @@ nvme_zns_zone_from_desc(struct dk_zone *zone,
 	zone->dz_condition = nvme_zns_zone_condition(NVM_ZNS_ZS(desc->zs));
 	zone->dz_flags_raw = desc->za;
 
+	if (zone->dz_condition == DK_ZONE_COND_FULL &&
+	    zone->dz_write_pointer_lba == DK_ZONE_WP_INVALID)
+		zone->dz_write_pointer_lba = zone->dz_start_lba +
+		    zone->dz_capacity_lba;
+
 	if (ISSET(desc->za, NVM_ZNS_ZA_RESET_RECOMMENDED))
 		SET(zone->dz_flags, DK_ZONE_FLAG_RESET_RECOMMENDED);
 }

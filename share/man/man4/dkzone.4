@@ -90,6 +90,9 @@ Each descriptor is returned as a
 .Vt struct dk_zone
 containing the zone start LBA, length, capacity, write pointer, type,
 condition, translated flags, and raw protocol values.
+If the underlying protocol marks the write pointer invalid for a full zone,
+drivers report the logical end of the zone as
+.Fa dz_start_lba No + Fa dz_capacity_lba .
 .It Dv DIOCZONECMD Fa "struct dk_zone_op *"
 Execute a zone management command.
 Before calling this operation, userland must set

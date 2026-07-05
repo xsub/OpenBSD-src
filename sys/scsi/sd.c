@@ -1275,6 +1275,11 @@ sd_zone_from_srz(struct dk_zone *zone, struct scsi_report_zones_desc *desc)
 	zone->dz_condition = sd_zone_condition(condition);
 	zone->dz_flags_raw = desc->zone_flags;
 
+	if (zone->dz_condition == DK_ZONE_COND_FULL &&
+	    zone->dz_write_pointer_lba == DK_ZONE_WP_INVALID)
+		zone->dz_write_pointer_lba = zone->dz_start_lba +
+		    zone->dz_capacity_lba;
+
 	if (ISSET(desc->zone_flags, SRZ_ZONE_RESET))
 		SET(zone->dz_flags, DK_ZONE_FLAG_RESET_RECOMMENDED);
 	if (ISSET(desc->zone_flags, SRZ_ZONE_NON_SEQ))
