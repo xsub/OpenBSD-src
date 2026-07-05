@@ -51,6 +51,21 @@ Expected high-level coverage in the captured run below:
 - report verification that the write pointer advanced by the write size
 - stale/non-WP host-managed data write rejection with `EINVAL` or `EROFS`
 
+## SCSI ZBC / Host-Managed SMR Transport Smoke
+
+The SCSI validation target intentionally reuses the same canonical smoke flow.
+When a real SCSI ZBC or host-managed SMR disk is attached, run:
+
+```sh
+cd /home/src/OpenBSD-src/regress/sys/sys/dkzone
+./dkzone-scsi-zbc-smoke.sh /dev/rsdXc 0
+```
+
+The wrapper prints `uname`, `hw.disknames`, and relevant attachment lines from
+`dmesg`, verifies that the raw disk reports host-managed `zone_mode=4`, and
+then runs `dkzone-vm-smoke.sh` unchanged.  A passing run should end with the
+same final `ok` as the NVMe ZNS transcript below.
+
 Example output:
 
 ```text
