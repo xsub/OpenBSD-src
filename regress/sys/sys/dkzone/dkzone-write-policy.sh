@@ -71,6 +71,10 @@ cleanup=1
 echo "== expect write at WP without report to fail =="
 "$dkzone" -w -s "$start_lba" "$dev"
 
+echo "== header-only report must not arm write cache =="
+"$dkzone" -n 0 -s "$start_lba" "$dev" >/dev/null
+"$dkzone" -w -s "$start_lba" "$dev"
+
 bad_lba=$((start_lba + 1))
 
 echo "== expect stale/non-WP ordinary write to fail =="
