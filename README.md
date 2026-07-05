@@ -38,8 +38,9 @@ Tested so far:
 - QEMU NVMe ZNS attaches as an `sd(4)` disk marked `zoned`.
 - NVMe ZNS `DIOCGZONEINFO` and `DIOCGZONEREPORT` work in the VM.
 - `dkzone-vm-smoke.sh /dev/rsd1c 0` is the canonical QEMU ZNS VM test. It
-  covers zone reports, paginated reports, report filters, finish/reset zone
-  management, and ordinary-write rejection with `EROFS`.
+  covers zone reports, header-only reports, paginated reports, report filters,
+  protocol-dependent report filter handling, finish/reset zone management, and
+  ordinary-write rejection with `EROFS`.
 
 ## Test Helper
 
@@ -65,9 +66,10 @@ cd /usr/src/regress/sys/sys/dkzone
 ```
 
 `dkzone-vm-smoke.sh /dev/rsd1c 0` is the canonical QEMU ZNS VM smoke test.  It
-rebuilds `dkzone`, checks a single report page, verifies paginated reporting,
-then runs the report filter, finish/reset zone management, and ordinary-write
-rejection smoke tests.
+rebuilds `dkzone`, checks a single report page, verifies the header-only
+`-n 0` report edge case, verifies paginated reporting, checks a
+protocol-dependent report filter, then runs the report filter, finish/reset
+zone management, and ordinary-write rejection smoke tests.
 
 For the QEMU ZNS test disk, the smoke helper rebuilds `dkzone` if needed,
 finishes the selected zone, verifies that it reports `full`, resets it, and
@@ -96,6 +98,7 @@ the maximum number of entries requested from the kernel, and `-s` sets the
 starting LBA for the report.  The `-p` option pages through reports by
 advancing from the last returned zone descriptor.  The `-r` option selects a
 report filter such as `all`, `empty`, `closed`, or `full`.
+Use `-n 0` for a header-only report.
 
 On a normal non-zoned disk, expected output begins with:
 

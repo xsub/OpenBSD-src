@@ -67,6 +67,22 @@ dkzone=./obj/dkzone
 section "single-page report"
 "$dkzone" -n 4 -s "$start_lba" "$dev"
 
+section "header-only report"
+"$dkzone" -n 0 -s "$start_lba" "$dev" >"$tmp"
+cat "$tmp"
+filled=$(awk '
+	/^report=/ {
+		for (i = 1; i <= NF; i++) {
+			if ($i ~ /^entries_filled=/) {
+				sub(/^entries_filled=/, "", $i)
+				print $i
+				exit
+			}
+		}
+	}
+' "$tmp")
+[ "$filled" = "0" ] || die "header-only report filled $filled entries"
+
 section "paginated report"
 "$dkzone" -p -n 4 -s "$start_lba" "$dev" >"$tmp"
 
@@ -79,6 +95,20 @@ last_start=$(awk '$1 ~ /^[0-9]+$/ { start = $2 } END { print start }' "$tmp")
 [ -n "$last_start" ] || die "could not parse last reported zone"
 
 echo "pagination pages=$pages zones=$zones last_start_lba=$last_start ok"
+
+section "protocol-dependent report filter"
+if "$dkzone" -r reset -n 0 -s "$start_lba" "$dev" >"$tmp" 2>&1; then
+	cat "$tmp"
+	echo "reset report filter supported ok"
+else
+	if grep -Eq "Operation not supported|Invalid argument" "$tmp"; then
+		cat "$tmp"
+		echo "reset report filter unsupported ok"
+	else
+		cat "$tmp"
+		die "unexpected reset report filter failure"
+	fi
+fi
 
 section "report filters"
 ./dkzone-report-filter.sh "$dev" "$start_lba"

@@ -119,6 +119,10 @@ struct dk_zone_report {
 #define DK_ZONE_SAME_LAST_DIFFERENT	0x02
 #define DK_ZONE_SAME_TYPES_DIFFERENT	0x03
 
+	/*
+	 * dzr_entries is the size of the user output array.  A zero value
+	 * requests a header-only report; dzr_zones may be NULL in that case.
+	 */
 	u_int32_t	dzr_entries;
 	u_int32_t	dzr_entries_filled;
 	/*

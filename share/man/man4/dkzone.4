@@ -82,6 +82,12 @@ values, and
 and
 .Fa dzr_zones
 to describe the output array.
+If
+.Fa dzr_entries
+is zero, the report is header-only and
+.Fa dzr_zones
+may be
+.Dv NULL .
 .Pp
 The common report options are:
 .Bl -tag -width DK_ZONE_REP_READONLY -compact
@@ -109,7 +115,7 @@ Additional report options such as
 and
 .Dv DK_ZONE_REP_NON_WP
 are protocol-dependent and may return
-.Er EINVAL
+.Er EOPNOTSUPP
 on drivers or devices that cannot express them.
 .Pp
 On return,
@@ -174,8 +180,8 @@ The
 ioctls may fail with:
 .Bl -tag -width Er
 .It Bq Er EINVAL
-The ABI version, report option, command option, flags, or output pointer is
-invalid.
+The ABI version, unknown report option, command option, flags, or output
+pointer is invalid.
 .It Bq Er EBADF
 A zone management command was attempted without opening the device for writing.
 .It Bq Er EOPNOTSUPP
