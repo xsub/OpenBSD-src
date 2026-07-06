@@ -57,6 +57,12 @@ Tested so far:
   single-sector, multi-sector, cached write-pointer continuation, and bad-write
   rejection coverage.  The policy check verifies that writes fail without a
   fresh zone report and fail when they are not at the cached write pointer.
+- Tail-boundary validation on the same VM passed
+  `dkzone-write-boundary.sh /dev/rsd1c 0`: it filled the first 64 MB zone to
+  `wp_lba=131071`, rejected a two-sector write crossing zone capacity with
+  `EINVAL`, wrote the final sector, reported `condition=full` at
+  `wp_lba=131072`, rejected another write at the full-zone write pointer with
+  `EROFS`, and reset the zone.
 - SCSI validation checks were run in the same VM: the QEMU NVMe ZNS
   disk is refused by `dkzone-scsi-zbc-smoke.sh` as NVMe-backed `sd(4)`, and
   the normal VirtIO boot disk `/dev/rsd0c` is refused before build/mutation
