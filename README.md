@@ -92,6 +92,7 @@ cd /usr/src/regress/sys/sys/dkzone
 ./dkzone-write-seq.sh /dev/rsd1c 0
 ./dkzone-write-seq.sh /dev/rsd1c 0 8
 ./dkzone-write-seq.sh /dev/rsd1c 0 8 2
+./dkzone-write-boundary.sh /dev/rsd1c 0
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ./dkzone-scsi-zbc-smoke.sh /dev/rsdXc 0
 ```
@@ -140,6 +141,15 @@ pointer advances between writes.
 The prototype permits only one in-flight raw zoned write against the cached
 descriptor; concurrent report or zone-management operations return `EBUSY`
 while that write is pending.
+
+`dkzone-write-boundary.sh` is a heavier focused boundary test.  It resets the
+selected zone, fills it until one sector remains, verifies that a two-sector
+write crossing the zone capacity is rejected, writes the final sector, verifies
+that the zone reports `full`, verifies that another write at the full-zone write
+pointer is rejected, and then resets the zone.  The default chunk size is 4096
+sectors; pass a third argument to change it.  The helper refuses zones larger
+than the built-in tail-test limit so it does not accidentally write a huge
+device zone during bring-up.
 
 `dkzone-scsi-zbc-smoke.sh` is the second-transport validation wrapper.  It is
 intended for a real SCSI ZBC or host-managed SMR target exposed as an OpenBSD

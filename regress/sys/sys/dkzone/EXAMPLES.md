@@ -34,6 +34,7 @@ the full smoke:
 ./dkzone-build.sh
 ./dkzone-write-seq.sh /dev/rsd1c 0
 ./dkzone-write-seq.sh /dev/rsd1c 0 8 2
+./dkzone-write-boundary.sh /dev/rsd1c 0
 ./dkzone-write-policy.sh /dev/rsd1c 0
 ./dkzone-vm-smoke.sh /dev/rsd1c 0
 ```
@@ -51,6 +52,7 @@ Expected high-level coverage in the captured run below:
   pointer
 - consecutive sequential raw writes without an intervening zone report
 - report verification that the write pointer advanced by the write size
+- optional tail boundary fill test for crossing-zone-capacity rejection
 - stale/non-WP host-managed data write rejection with `EINVAL` or `EROFS`
 
 ## SCSI ZBC / Host-Managed SMR Transport Smoke
