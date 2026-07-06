@@ -245,6 +245,25 @@ ordinary_write lba=0 error=EINVAL ok
 zone_reset lba=0 flags=0x0 ok
 ok
 
+== tail boundary write ==
+== reset zone before tail boundary probe ==
+zone_reset lba=0 flags=0x0 ok
+== report reset write pointer ==
+report_one start_lba=0 wp_lba=0 condition=empty
+== fill zone until one sector remains ==
+fill_to_tail writes=32 sectors=131071 wp_lba=131071 ok
+== reject write crossing zone tail ==
+ordinary_write lba=131071 error=EINVAL ok
+== write final sector at zone tail ==
+sequential_write lba=131071 bytes=512 sectors=1 ok
+== report full zone after tail write ==
+report_one start_lba=0 wp_lba=131072 condition=full
+== reject write at full-zone write pointer ==
+ordinary_write lba=131072 error=EROFS ok
+== reset zone after tail boundary probe ==
+zone_reset lba=0 flags=0x0 ok
+ok
+
 == write policy ==
 == reset zone before write-policy probe ==
 zone_reset lba=0 flags=0x0 ok
