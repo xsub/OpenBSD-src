@@ -101,6 +101,7 @@ test_abi(void)
 #define DKZONE_DEFAULT_SECSIZE	512
 #define DKZONE_MAX_WRITE_SECTORS	4096
 #define DKZONE_MAX_WRITE_ITERATIONS	1024
+#define DKZONE_MAX_TAIL_TEST_SECTORS	1048576ULL
 
 static void
 usage(void)
@@ -112,6 +113,7 @@ usage(void)
 	    "       dkzone -m open|close|finish|reset [-a | -l lba] device\n");
 	fprintf(stderr,
 	    "       dkzone -S [-c sectors] [-i writes] [-s start-lba] device\n");
+	fprintf(stderr, "       dkzone -T [-c sectors] [-s start-lba] device\n");
 	fprintf(stderr, "       dkzone -W [-c sectors] [-s start-lba] device\n");
 	fprintf(stderr, "       dkzone -w [-c sectors] [-s start-lba] device\n");
 	fprintf(stderr,
@@ -622,6 +624,27 @@ write_probe(const char *path, u_int64_t lba, u_int sectors,
 }
 
 static void
+expect_write_failure_fd(int fd, const char *path, u_int64_t lba,
+    u_int secsize, u_int sectors, int expected_error)
+{
+	ssize_t n;
+	int error;
+
+	n = write_lba_fd(fd, path, lba, secsize, sectors, &error);
+	if (n == -1 && error == expected_error) {
+		printf("ordinary_write lba=%llu error=%s ok\n",
+		    (unsigned long long)lba, errno_name(error));
+		return;
+	}
+	if (n == -1) {
+		errno = error;
+		err(1, "ordinary write %s", path);
+	}
+
+	errx(1, "ordinary write unexpectedly wrote %zd bytes", n);
+}
+
+static void
 report_one_fd(int fd, const char *path, u_int64_t start_lba,
     struct dk_zone *zone)
 {
@@ -742,6 +765,111 @@ write_sequence_probe(const char *path, u_int64_t start_lba, u_int sectors,
 	close(fd);
 	printf("ok\n");
 }
+
+static void
+write_tail_probe(const char *path, u_int64_t start_lba, u_int sectors)
+{
+	struct dk_zone before, after;
+	u_int secsize, todo;
+	u_int64_t fill_target, fill_writes, fill_sectors, remaining;
+	u_int64_t write_lba, zone_end;
+	ssize_t n;
+	int error;
+	int fd;
+
+	fd = open(path, O_RDWR);
+	if (fd == -1)
+		err(1, "open %s", path);
+	secsize = device_secsize(fd);
+
+	printf("== reset zone before tail boundary probe ==\n");
+	zone_command_fd(fd, path, DK_ZONE_OP_RESET, start_lba, 0);
+
+	printf("== report reset write pointer ==\n");
+	report_one_fd(fd, path, start_lba, &before);
+	if (before.dz_start_lba != start_lba)
+		errx(1, "expected first zone at %llu, got %llu",
+		    (unsigned long long)start_lba,
+		    (unsigned long long)before.dz_start_lba);
+	if (before.dz_write_pointer_lba != start_lba)
+		errx(1, "expected reset write pointer %llu, got %llu",
+		    (unsigned long long)start_lba,
+		    (unsigned long long)before.dz_write_pointer_lba);
+	if (before.dz_capacity_lba < 2)
+		errx(1, "zone capacity is too small for tail boundary probe");
+	if (before.dz_capacity_lba > DKZONE_MAX_TAIL_TEST_SECTORS)
+		errx(1, "zone capacity %llu is too large for tail boundary "
+		    "probe limit %llu", (unsigned long long)
+		    before.dz_capacity_lba,
+		    (unsigned long long)DKZONE_MAX_TAIL_TEST_SECTORS);
+	if (before.dz_start_lba > DK_ZONE_WP_INVALID -
+	    before.dz_capacity_lba)
+		errx(1, "zone end overflow");
+	zone_end = before.dz_start_lba + before.dz_capacity_lba;
+	fill_target = zone_end - 1;
+
+	printf("== fill zone until one sector remains ==\n");
+	write_lba = before.dz_write_pointer_lba;
+	fill_writes = 0;
+	fill_sectors = 0;
+	while (write_lba < fill_target) {
+		remaining = fill_target - write_lba;
+		todo = sectors;
+		if (todo > remaining)
+			todo = (u_int)remaining;
+		n = write_lba_fd(fd, path, write_lba, secsize, todo, &error);
+		if (n != (ssize_t)((size_t)secsize * todo)) {
+			if (n == -1) {
+				errno = error;
+				err(1, "sequential write %s", path);
+			}
+			errx(1, "sequential write wrote %zd bytes, expected %zu",
+			    n, (size_t)secsize * todo);
+		}
+		write_lba += todo;
+		fill_writes++;
+		fill_sectors += todo;
+	}
+	printf("fill_to_tail writes=%llu sectors=%llu wp_lba=%llu ok\n",
+	    (unsigned long long)fill_writes,
+	    (unsigned long long)fill_sectors,
+	    (unsigned long long)write_lba);
+
+	printf("== reject write crossing zone tail ==\n");
+	expect_write_failure_fd(fd, path, write_lba, secsize, 2, EINVAL);
+
+	printf("== write final sector at zone tail ==\n");
+	n = write_lba_fd(fd, path, write_lba, secsize, 1, &error);
+	if (n != (ssize_t)secsize) {
+		if (n == -1) {
+			errno = error;
+			err(1, "sequential write %s", path);
+		}
+		errx(1, "sequential write wrote %zd bytes, expected %u",
+		    n, secsize);
+	}
+	printf("sequential_write lba=%llu bytes=%u sectors=1 ok\n",
+	    (unsigned long long)write_lba, secsize);
+
+	printf("== report full zone after tail write ==\n");
+	report_one_fd(fd, path, start_lba, &after);
+	if (after.dz_write_pointer_lba != zone_end)
+		errx(1, "expected full-zone write pointer %llu, got %llu",
+		    (unsigned long long)zone_end,
+		    (unsigned long long)after.dz_write_pointer_lba);
+	if (after.dz_condition != DK_ZONE_COND_FULL)
+		errx(1, "expected full-zone condition full, got %s",
+		    zone_condition_name(after.dz_condition));
+
+	printf("== reject write at full-zone write pointer ==\n");
+	expect_write_failure_fd(fd, path, zone_end, secsize, 1, EROFS);
+
+	printf("== reset zone after tail boundary probe ==\n");
+	zone_command_fd(fd, path, DK_ZONE_OP_RESET, start_lba, 0);
+
+	close(fd);
+	printf("ok\n");
+}
 #endif
 
 int
@@ -764,6 +892,7 @@ main(int argc, char **argv)
 	int have_write_sectors = 0;
 	int paginate = 0;
 	int write_sequence = 0;
+	int write_tail = 0;
 	int write_allow = 0;
 	int write_policy = 0;
 #endif
@@ -779,7 +908,7 @@ main(int argc, char **argv)
 		usage();
 		return 0;
 	}
-	while ((ch = getopt(argc, argv, "ac:hi:l:m:n:pr:s:wWS")) != -1) {
+	while ((ch = getopt(argc, argv, "ac:hi:l:m:n:pr:s:wWST")) != -1) {
 		switch (ch) {
 		case 'a':
 			all = 1;
@@ -825,6 +954,9 @@ main(int argc, char **argv)
 		case 'S':
 			write_sequence = 1;
 			break;
+		case 'T':
+			write_tail = 1;
+			break;
 		default:
 			usage();
 			return 1;
@@ -833,23 +965,25 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	if (write_policy || write_allow || write_sequence) {
+	if (write_policy || write_allow || write_sequence || write_tail) {
 		if (argc != 1) {
 			usage();
 			return 1;
 		}
 		if ((write_policy != 0) + (write_allow != 0) +
-		    (write_sequence != 0) > 1)
-			errx(1, "-S, -w, and -W cannot be combined");
+		    (write_sequence != 0) + (write_tail != 0) > 1)
+			errx(1, "-S, -T, -w, and -W cannot be combined");
 		if (cmd != NULL || all || have_lba || have_report_option ||
 		    paginate)
-			errx(1, "-S/-w/-W cannot be combined with -a, -l, "
+			errx(1, "-S/-T/-w/-W cannot be combined with -a, -l, "
 			    "-m, -p, or -r");
 		if (!write_sequence && have_write_iterations)
 			errx(1, "-i is only valid with -S");
 		if (write_sequence)
 			write_sequence_probe(argv[0], start_lba,
 			    write_sectors, write_iterations);
+		else if (write_tail)
+			write_tail_probe(argv[0], start_lba, write_sectors);
 		else
 			write_probe(argv[0], start_lba, write_sectors,
 			    write_allow);

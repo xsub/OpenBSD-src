@@ -887,6 +887,7 @@ sd_zoned_cache_update(struct sd_softc *sc, const struct dk_zone *zone)
 	sc->zone_size_lba = zone->dz_length_lba;
 
 	if (zone->dz_length_lba == 0 || zone->dz_capacity_lba == 0 ||
+	    zone->dz_capacity_lba > zone->dz_length_lba ||
 	    zone->dz_write_pointer_lba == DK_ZONE_WP_INVALID) {
 		sd_zoned_cache_invalidate(sc);
 		return;
