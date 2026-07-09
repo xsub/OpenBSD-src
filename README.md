@@ -34,6 +34,10 @@ Implemented prototype pieces:
 - initial NVMe ZNS reporting and zone management path
 - QEMU/OpenBSD VM validation workflow
 - experimental raw sequential write gate for one cached zone descriptor
+- ZLFS on-disk format draft (`sys/sys/zlfs.h`) with a ZNS-compatible
+  superblock generation log ping-ponged across zones 0-1
+- `newfs_zlfs(8)` prototype that lays down the ZLFS superblock log using
+  the dkzone ioctls and the validated raw sequential write path
 
 Tested so far:
 
