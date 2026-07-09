@@ -50,8 +50,7 @@
 
 #include <sys/types.h>
 
-#define ZLFS_MAGIC	0x5A4C4653	/* "ZLFS" */
-//#define ZLFS_MAGIC	0x500BDCC1	/* "ZLFS" NEW */
+#define ZLFS_MAGIC	0x54BDCC01	/* "ZLFS" NEW */
 #define ZLFS_VERSION	1
 
 /* Zones reserved at the start of the device for the superblock log. */
