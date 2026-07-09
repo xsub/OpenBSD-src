@@ -100,6 +100,11 @@ static struct vfsconf vfsconflist[] = {
 	{ &tmpfs_vfsops, MOUNT_TMPFS, 19, 0, MNT_LOCAL,
 	    sizeof(struct tmpfs_args) },
 #endif
+
+#ifdef ZLFS
+	/* No mount args yet; set vfc_datasize when zlfs_args appears. */
+	{ &zlfs_vfsops, MOUNT_ZLFS, 20, 0, MNT_LOCAL, 0 },
+#endif
 };
 
 
