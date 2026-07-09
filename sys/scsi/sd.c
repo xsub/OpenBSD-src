@@ -113,6 +113,8 @@ int	sd_zoned_buf_lba(struct sd_softc *, struct buf *, u_int64_t *,
 int	sd_zoned_write_validate(struct sd_softc *, struct buf *);
 void	sd_zoned_write_done(struct sd_softc *, struct buf *);
 void	sd_zoned_zonecmd_done(struct sd_softc *, struct dk_zone_op *);
+void	sd_zoned_cache_update(struct sd_softc *, const struct dk_zone *);
+void	sd_zoned_cache_invalidate(struct sd_softc *);
 
 int	sd_cmd_rw6(struct scsi_generic *, int, u_int64_t, u_int32_t);
 int	sd_cmd_rw10(struct scsi_generic *, int, u_int64_t, u_int32_t);
@@ -1589,8 +1591,25 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 		return ENXIO;
 	link = sc->sc_link;
 	error = scsi_do_ioctl(link, DIOCGZONEREPORT, (caddr_t)dzr, 0);
-	if (error != ENOTTY)
+	if (error != ENOTTY) {
+		/*
+		 * The adapter handled the report and copied the zone
+		 * descriptors straight out to userland.  Refresh the
+		 * cached zone descriptor used by the write gate from
+		 * the first returned zone.  The descriptor is re-read
+		 * from the user buffer, so the cache is advisory only;
+		 * the device's own write-pointer enforcement remains
+		 * authoritative.
+		 */
+		if (error == 0 && dzr->dzr_entries_filled > 0) {
+			if (copyin(&dzr->dzr_zones[0], &zone,
+			    sizeof(zone)) == 0)
+				sd_zoned_cache_update(sc, &zone);
+			else
+				sd_zoned_cache_invalidate(sc);
+		}
 		return error;
+	}
 
 	if (sc->zone_mode == DK_ZONE_MODE_NONE ||
 	    !ISSET(sc->zone_flags, DK_ZONE_FLAG_REPORT_SUP))

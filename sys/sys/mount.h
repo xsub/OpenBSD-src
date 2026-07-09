@@ -325,6 +325,7 @@ struct statfs {
 #define	MOUNT_UDF	"udf"		/* UDF */
 #define	MOUNT_TMPFS	"tmpfs"		/* tmpfs */
 #define	MOUNT_FUSEFS	"fuse"		/* FUSE */
+#define	MOUNT_ZLFS	"zlfs"		/* Zoned Log-Structured Filesystem */
 
 /*
  * Structure per mounted file system.  Each mounted file system has an
@@ -555,6 +556,7 @@ extern	const struct vfsops ntfs_vfsops;
 extern	const struct vfsops udf_vfsops;
 extern	const struct vfsops fusefs_vfsops;
 extern	const struct vfsops tmpfs_vfsops;
+extern	const struct vfsops zlfs_vfsops;
 
 #include <net/radix.h>
 #include <sys/socket.h>		/* XXX for AF_MAX */

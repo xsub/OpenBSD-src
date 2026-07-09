@@ -51,8 +51,6 @@
 #define _SCSI_SDVAR_H
 
 #ifdef _KERNEL
-struct dk_zone;
-
 struct sd_softc {
 	struct device		sc_dev;
 	struct disk		sc_dk;
@@ -88,8 +86,5 @@ struct sd_softc {
 
 	struct scsi_xshandler sc_xsh;
 };
-
-void	sd_zoned_cache_update(struct sd_softc *, const struct dk_zone *);
-void	sd_zoned_cache_invalidate(struct sd_softc *);
 #endif /* _KERNEL */
 #endif /* _SCSI_SDVAR_H */

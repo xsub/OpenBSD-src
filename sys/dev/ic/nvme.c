@@ -170,6 +170,8 @@ static const struct nvme_ops nvme_ops = {
 
 #define NVME_TIMO_QOP			5000	/* ms to create/delete queue */
 #define NVME_TIMO_PT			5000	/* ms to complete passthrough */
+#define NVME_TIMO_ZONE_OP		60000	/* ms to open/close a zone */
+#define NVME_TIMO_ZONE_RESET		300000	/* ms to reset/finish zones */
 #define NVME_TIMO_IDENT			10000	/* ms to probe/identify */
 #define NVME_TIMO_LOG_PAGE		5000	/* ms to read log pages */
 #define NVME_TIMO_DELAYNS		10	/* ns to delay() in poll loop */
@@ -1228,7 +1230,9 @@ nvme_zns_zone_mgmt_send(struct nvme_softc *sc, struct scsi_link *link,
 	ccb->ccb_done = nvme_empty_done;
 	ccb->ccb_cookie = &sqe;
 
-	rv = nvme_poll(sc, sc->sc_q, ccb, nvme_sqe_fill, NVME_TIMO_PT);
+	rv = nvme_poll(sc, sc->sc_q, ccb, nvme_sqe_fill,
+	    (zsa == NVM_ZNS_ZSA_RESET || zsa == NVM_ZNS_ZSA_FINISH) ?
+	    NVME_TIMO_ZONE_RESET : NVME_TIMO_ZONE_OP);
 
 	scsi_io_put(&sc->sc_iopool, ccb);
 
@@ -1260,9 +1264,6 @@ nvme_zns_ioctl_zoneinfo(struct nvme_softc *sc, struct scsi_link *link,
 	dzi->dzi_zone_size_lba = lemtoh64(&zns->lbafe[flbas].zsze);
 	dzi->dzi_max_open_zones = nvme_zns_resource(lemtoh32(&zns->mor));
 	dzi->dzi_max_active_zones = nvme_zns_resource(lemtoh32(&zns->mar));
-	if (link->device_softc != NULL)
-		((struct sd_softc *)link->device_softc)->zone_size_lba =
-		    dzi->dzi_zone_size_lba;
 
 	return 0;
 }
@@ -1336,9 +1337,6 @@ nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
 		error = copyout(&zone, &dzr->dzr_zones[i], sizeof(zone));
 		if (error != 0)
 			break;
-		if (i == 0 && link->device_softc != NULL)
-			sd_zoned_cache_update(
-			    (struct sd_softc *)link->device_softc, &zone);
 	}
 
 done:
