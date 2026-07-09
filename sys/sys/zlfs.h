@@ -51,10 +51,14 @@
 #include <sys/types.h>
 
 #define ZLFS_MAGIC	0x5A4C4653	/* "ZLFS" */
+//#define ZLFS_MAGIC	0x500BDCC1	/* "ZLFS" NEW */
 #define ZLFS_VERSION	1
 
 /* Zones reserved at the start of the device for the superblock log. */
 #define ZLFS_SB_ZONES	2
+
+/* Well-known inode numbers.  0 and 1 are reserved and never allocated. */
+#define ZLFS_ROOT_INO	2
 
 /*
  * ZLFS Superblock.
@@ -74,14 +78,19 @@ struct zlfs_super {
 	u_int8_t	zs_uuid[16];		/* filesystem identity */
 
 	/*
-	 * ZLFS requires uniform zone capacity: mkfs records the device
-	 * minimum here and refuses devices whose per-zone capacity
-	 * (dz_capacity_lba) varies below it.
+	 * zs_zone_cap_lba is the smallest per-zone capacity
+	 * (dz_capacity_lba) found on the device at mkfs time; ZLFS
+	 * uses every zone only up to this uniform bound.
 	 */
 	u_int64_t	zs_zone_size_lba;	/* device zone size */
 	u_int64_t	zs_zone_cap_lba;	/* usable LBAs per zone */
 	u_int64_t	zs_total_zones;
 
+	/*
+	 * zs_checkpoint_lba == 0 means no checkpoint exists yet (freshly
+	 * created filesystem).  LBA 0 lies inside superblock zone 0, so
+	 * it can never address a real checkpoint block.
+	 */
 	u_int64_t	zs_generation;		/* superblock generation */
 	u_int64_t	zs_checkpoint_lba;	/* newest checkpoint block */
 	u_int64_t	zs_root_ino;		/* root directory inode # */
