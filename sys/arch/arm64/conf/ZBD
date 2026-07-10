@@ -14,6 +14,7 @@ machine		arm64
 maxusers	32
 
 option		MULTIPROCESSOR
+option		SUSPEND		# cpu.c's cpu_halt() requires it with MP
 
 option		DDB		# in-kernel debugger
 option		DIAGNOSTIC	# internal consistency checks
@@ -52,11 +53,27 @@ acpi0		at mainbus?
 acpicpu*	at acpi?
 acpimcfg*	at acpi?	# PCIe ECAM via MCFG table; required for pci
 acpiiort*	at acpi?	# MSI device-id mappings
+acpiec*		at acpi?	# acpi.c references acpiec_read/write
 acpige*		at acpi?
 acpibtn*	at acpi?	# QEMU power button
 acpipci*	at acpi?
 pci*		at acpipci?
 pluart*		at acpi?
+
+# arm64 link floor: machdep.c consinit() calls every SoC uart's
+# init_cons unconditionally, dsdt.c needs iic_exec, and pluart shares
+# com(4)'s tty entry points.  None of these attach on QEMU virt, but
+# the kernel does not link without them.
+com*		at acpi?
+com*		at fdt?
+qcuart*		at acpi?
+amluart*	at fdt?
+cduart*		at fdt?
+exuart*		at fdt?
+imxuart*	at fdt?
+mvuart*		at fdt?
+iicmux*		at fdt?
+iic*		at iicmux?
 
 # FDT
 simplebus*	at fdt?
