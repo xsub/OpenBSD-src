@@ -378,6 +378,7 @@ write_filesystem(int fd, const char *path, const struct zone_geometry *g,
 	u_int64_t dzs = (u_int64_t)ZLFS_SB_ZONES * g->zone_size_lba;
 	u_int64_t lba[ZLFS_MKFS_NBLOCKS];
 	u_int64_t now = (u_int64_t)time(NULL);
+	u_int64_t imap_ent;
 	u_int32_t crc, i;
 	size_t filelen = sizeof(zlfs_welcome) - 1;
 
@@ -444,10 +445,12 @@ write_filesystem(int fd, const char *path, const struct zone_geometry *g,
 
 	/* Block 5: inode map (imap[ino] = inode block LBA). */
 	memset(blk, 0, block_size);
-	htolem64((u_int64_t *)(blk + ZLFS_ROOT_INO * sizeof(u_int64_t)),
-	    lba[ZLFS_MKFS_ROOTINO]);
-	htolem64((u_int64_t *)(blk + ZLFS_FIRST_INO * sizeof(u_int64_t)),
-	    lba[ZLFS_MKFS_FILEINO]);
+	imap_ent = htole64(lba[ZLFS_MKFS_ROOTINO]);
+	memcpy(blk + ZLFS_ROOT_INO * sizeof(u_int64_t), &imap_ent,
+	    sizeof(imap_ent));
+	imap_ent = htole64(lba[ZLFS_MKFS_FILEINO]);
+	memcpy(blk + ZLFS_FIRST_INO * sizeof(u_int64_t), &imap_ent,
+	    sizeof(imap_ent));
 	write_block(fd, path, lba[ZLFS_MKFS_IMAP], secsize, blk, block_size);
 
 	/* Block 6: checkpoint. */
