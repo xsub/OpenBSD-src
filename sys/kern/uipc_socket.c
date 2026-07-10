@@ -2534,13 +2534,13 @@ so_print(void *v,
 	if (so->so_sp != NULL) {
 		(*pr)("\tssp_socket: %p\n", so->so_sp->ssp_socket);
 		(*pr)("\tssp_soback: %p\n", so->so_sp->ssp_soback);
-		(*pr)("\tssp_len: %lld\n", so->so_splicelen);
-		(*pr)("\tssp_max: %lld\n", so->so_splicemax);
-		(*pr)("\tssp_idletv: %lld %ld\n", so->so_spliceidletv.tv_sec,
-		    so->so_spliceidletv.tv_usec);
+		(*pr)("\tssp_len: %lld\n", so->so_sp->ssp_len);
+		(*pr)("\tssp_max: %lld\n", so->so_sp->ssp_max);
+		(*pr)("\tssp_idletv: %lld %ld\n", so->so_sp->ssp_idletv.tv_sec,
+		    so->so_sp->ssp_idletv.tv_usec);
 		(*pr)("\tssp_idleto: %spending (@%d)\n",
-		    timeout_pending(&so->so_spliceidleto) ? "" : "not ",
-		    so->so_spliceidleto.to_time);
+		    timeout_pending(&so->so_sp->ssp_idleto) ? "" : "not ",
+		    so->so_sp->ssp_idleto.to_time);
 	}
 
 	(*pr)("so_rcv:\n");
