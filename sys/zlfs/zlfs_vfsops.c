@@ -14,6 +14,7 @@
 #include <sys/namei.h>
 #include <sys/proc.h>
 #include <sys/vnode.h>
+#include <sys/lock.h>
 #include <sys/mount.h>
 #include <sys/buf.h>
 #include <sys/fcntl.h>
