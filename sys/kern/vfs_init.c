@@ -102,8 +102,8 @@ static struct vfsconf vfsconflist[] = {
 #endif
 
 #ifdef ZLFS
-	/* No mount args yet; set vfc_datasize when zlfs_args appears. */
-	{ &zlfs_vfsops, MOUNT_ZLFS, 20, 0, MNT_LOCAL, 0 },
+	{ &zlfs_vfsops, MOUNT_ZLFS, 20, 0, MNT_LOCAL,
+	    sizeof(struct zlfs_args) },
 #endif
 };
 

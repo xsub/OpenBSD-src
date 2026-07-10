@@ -1126,6 +1126,8 @@ file lib/libz/trees.c			ppp_deflate | ipsec | crypto | ddb
 file lib/libz/compress.c		ppp_deflate | ipsec | crypto | ddb
 
 # Zoned Log-Structured File System (ZLFS)
+# Requires sd(4): the zone reports come from dk_zone_report_kern() in sd.c.
 file zlfs/zlfs_vfsops.c			zlfs
 file zlfs/zlfs_vnops.c			zlfs
 file zlfs/zlfs_alloc.c			zlfs
+file zlfs/zlfs_subr.c			zlfs

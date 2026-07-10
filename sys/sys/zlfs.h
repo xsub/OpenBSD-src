@@ -160,8 +160,4 @@ struct zlfs_zone_summary {
 	u_int64_t	zz_checksum;	/* UUID-seeded CRC32C, see above */
 };
 
-#ifdef _KERNEL
-void	zlfs_alloc_init(void);
-#endif /* _KERNEL */
-
 #endif /* _SYS_ZLFS_H_ */

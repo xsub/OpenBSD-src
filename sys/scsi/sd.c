@@ -105,6 +105,8 @@ int	sd_ioctl_cache(struct sd_softc *, long, struct dk_cache *);
 int	sd_ioctl_zoneinfo(struct sd_softc *, struct dk_zone_info *);
 int	sd_ioctl_zonereport(struct sd_softc *, struct dk_zone_report *);
 int	sd_ioctl_zonecmd(struct sd_softc *, struct dk_zone_op *, int);
+int	sd_zbc_report_zones_kern(struct sd_softc *, u_int64_t,
+	    struct dk_zone *, u_int32_t, u_int32_t *);
 int	sd_zbc_report_zones(struct sd_softc *, u_int64_t, u_int8_t, void *,
 	    u_int32_t, u_int32_t *, int);
 int	sd_zbc_zone_cmd(struct sd_softc *, u_int64_t, u_int8_t, int, int);
@@ -1687,6 +1689,120 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 
 done:
 	dma_free(buf, buflen);
+	return error;
+}
+
+/*
+ * Native SCSI ZBC zone report into a kernel buffer, paging through
+ * REPORT ZONES internally.  Unlike the ioctl path this never touches
+ * the raw-write-gate zone cache.
+ */
+int
+sd_zbc_report_zones_kern(struct sd_softc *sc, u_int64_t start_lba,
+    struct dk_zone *zones, u_int32_t nzones, u_int32_t *filled)
+{
+	struct scsi_report_zones_hdr	*hdr;
+	struct scsi_report_zones_desc	*desc;
+	struct dk_zone			*zone;
+	u_int64_t			 max_lba;
+	u_int32_t			 buflen, datalen, entries_avail;
+	u_int32_t			 got, i, maxentries, returned;
+	void				*buf;
+	int				 error = 0;
+
+	*filled = 0;
+	if (sc->zone_mode == DK_ZONE_MODE_NONE ||
+	    !ISSET(sc->zone_flags, DK_ZONE_FLAG_REPORT_SUP))
+		return EOPNOTSUPP;
+	if (nzones == 0)
+		return EINVAL;
+
+	maxentries = (MAXPHYS - sizeof(*hdr)) / sizeof(*desc);
+	buflen = sizeof(*hdr) + MIN(nzones, maxentries) * sizeof(*desc);
+	buf = dma_alloc(buflen, PR_WAITOK | PR_ZERO);
+	if (buf == NULL)
+		return ENOMEM;
+
+	while (*filled < nzones) {
+		error = sd_zbc_report_zones(sc, start_lba, ZBC_IN_REP_ALL,
+		    buf, buflen, &datalen, 0);
+		if (error != 0)
+			break;
+		if (datalen < sizeof(*hdr)) {
+			error = EIO;
+			break;
+		}
+
+		hdr = buf;
+		desc = hdr->desc_list;
+		entries_avail = _4btol(hdr->length) / sizeof(*desc);
+		returned = MIN((datalen - sizeof(*hdr)) / sizeof(*desc),
+		    entries_avail);
+		got = MIN(returned, nzones - *filled);
+		if (got == 0)
+			break;
+
+		for (i = 0; i < got; i++) {
+			zone = &zones[*filled];
+			sd_zone_from_srz(zone, &desc[i]);
+			if (zone->dz_length_lba == 0 ||
+			    zone->dz_start_lba >
+			    UINT64_MAX - zone->dz_length_lba) {
+				error = EIO;
+				goto done;
+			}
+			start_lba = zone->dz_start_lba + zone->dz_length_lba;
+			(*filled)++;
+		}
+
+		max_lba = _8btol(hdr->maximum_lba);
+		if (max_lba != 0 && start_lba > max_lba)
+			break;
+	}
+
+done:
+	dma_free(buf, buflen);
+	return error;
+}
+
+/*
+ * Kernel entry point for zone reports, dispatching to the adapter's
+ * native implementation (NVMe ZNS) or the SCSI ZBC path.
+ */
+int
+dk_zone_report_kern(dev_t dev, u_int64_t start_lba, struct dk_zone *zones,
+    u_int32_t nzones, u_int32_t *filled)
+{
+	struct sd_softc		*sc;
+	struct scsi_link	*link;
+	int			 error;
+
+	*filled = 0;
+	/*
+	 * Reject anything that is not an sd(4) block device before
+	 * treating the minor as an sd unit; otherwise a non-sd dev_t
+	 * whose minor happens to match an sd unit would report an
+	 * unrelated disk's zones.
+	 */
+	if (major(dev) >= nblkdev || bdevsw[major(dev)].d_open != sdopen)
+		return ENXIO;
+	sc = sdlookup(DISKUNIT(dev));
+	if (sc == NULL)
+		return ENXIO;
+	if (ISSET(sc->flags, SDF_DYING)) {
+		device_unref(&sc->sc_dev);
+		return ENXIO;
+	}
+	link = sc->sc_link;
+
+	if (link->bus->sb_adapter->dev_zone_report != NULL)
+		error = link->bus->sb_adapter->dev_zone_report(link,
+		    start_lba, zones, nzones, filled);
+	else
+		error = sd_zbc_report_zones_kern(sc, start_lba, zones,
+		    nzones, filled);
+
+	device_unref(&sc->sc_dev);
 	return error;
 }
 

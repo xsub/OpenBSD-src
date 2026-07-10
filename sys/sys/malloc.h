@@ -171,7 +171,7 @@
 #define	M_UDFFENTRY	141	/* UDF file entries */
 #define	M_UDFFID	142	/* UDF file IDs */
 
-	/*		143	   free */
+#define	M_ZLFS		143	/* ZLFS mount/node structures */
 
 #define	M_AGP		144	/* AGP memory */
 
@@ -304,7 +304,7 @@
 	"UDF mount",	/* 140 M_UDFMOUNT */ \
 	"UDF file entry",	/* 141 M_UDFFENTRY */ \
 	"UDF file id",	/* 142 M_UDFFID */ \
-	NULL,	/* 143 free */ \
+	"ZLFS",	/* 143 M_ZLFS */ \
 	"AGP Memory",	/* 144 M_AGP */ \
 	"DRM",	/* 145 M_DRM */ \
 }

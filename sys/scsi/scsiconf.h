@@ -224,12 +224,22 @@ extern int scsi_autoconf;
  * whatever low-end drivers they are attached to.  Each adapter type has one
  * of these statically allocated.
  */
+struct dk_zone;
+
 struct scsi_adapter {
 	void		(*scsi_cmd)(struct scsi_xfer *);
 	void		(*dev_minphys)(struct buf *, struct scsi_link *);
 	int		(*dev_probe)(struct scsi_link *);
 	void		(*dev_free)(struct scsi_link *);
 	int		(*ioctl)(struct scsi_link *, u_long, caddr_t, int);
+	/*
+	 * Optional zoned block support: report zones into a kernel
+	 * buffer for in-kernel consumers (filesystems).  NULL when the
+	 * adapter has no native zone reporting; sd(4) then falls back
+	 * to SCSI ZBC REPORT ZONES.
+	 */
+	int		(*dev_zone_report)(struct scsi_link *, u_int64_t,
+			    struct dk_zone *, u_int32_t, u_int32_t *);
 };
 
 struct scsi_iopool;
