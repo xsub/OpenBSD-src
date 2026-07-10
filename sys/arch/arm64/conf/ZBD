@@ -47,9 +47,13 @@ efi0		at mainbus?
 smbios0		at efi?
 apm0		at mainbus?
 
-# ACPI (QEMU provides tables when booted via UEFI)
+# ACPI (this VM boots via UEFI/ACPI: mainbus0 reports "ACPI")
 acpi0		at mainbus?
 acpicpu*	at acpi?
+acpimcfg*	at acpi?	# PCIe ECAM via MCFG table; required for pci
+acpiiort*	at acpi?	# MSI device-id mappings
+acpige*		at acpi?
+acpibtn*	at acpi?	# QEMU power button
 acpipci*	at acpi?
 pci*		at acpipci?
 pluart*		at acpi?
