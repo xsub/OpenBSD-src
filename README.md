@@ -34,10 +34,15 @@ Implemented prototype pieces:
 - initial NVMe ZNS reporting and zone management path
 - QEMU/OpenBSD VM validation workflow
 - experimental raw sequential write gate for one cached zone descriptor
-- ZLFS on-disk format draft (`sys/sys/zlfs.h`) with a ZNS-compatible
-  superblock generation log ping-ponged across zones 0-1
+- ZLFS on-disk format v1 (`sys/sys/zlfs.h`): little-endian, CRC32C
+  checksums, and a ZNS-compatible superblock generation log ping-ponged
+  across zones 0-1 (no conventional zone required)
+- ZLFS registered with the VFS (`option ZLFS`, `vfs_init.c` typenum 20,
+  `MOUNT_ZLFS`); all operations still return `EOPNOTSUPP`
 - `newfs_zlfs(8)` prototype that lays down the ZLFS superblock log using
   the dkzone ioctls and the validated raw sequential write path
+- minimal `ZBD` kernel config (`sys/arch/arm64/conf/ZBD`) covering only
+  the QEMU virt machine for fast development rebuilds
 
 Tested so far:
 
@@ -71,6 +76,14 @@ Tested so far:
   disk is refused by `dkzone-scsi-zbc-smoke.sh` as NVMe-backed `sd(4)`, and
   the normal VirtIO boot disk `/dev/rsd0c` is refused before build/mutation
   because it is not marked `zoned` in `dmesg`.
+- `newfs_zlfs sd1c` ran end to end on the QEMU ZNS VM: zone enumeration
+  and geometry validation (128 zones of 131072 LBAs), superblock zones
+  reset, the write gate armed by a fresh zone report, the generation-0
+  superblock written at LBA 0 through the raw sequential write path and
+  read back with a passing checksum.  A `hexdump` of the device confirmed
+  the on-disk bytes field by field against `sys/sys/zlfs.h` (magic
+  `0x54BDCC01`, version, block size, UUID, geometry, root inode,
+  little-endian CRC32C in the final struct slot).
 - The next cross-transport milestone is to run the same `dkzone-vm-smoke.sh`
   flow against a SCSI ZBC or host-managed SMR target.  The
   `dkzone-scsi-zbc-smoke.sh` wrapper prints target evidence, refuses
@@ -200,6 +213,25 @@ target LBA matches the cached write pointer for the last reported sequential
 zone and the transfer fits within that zone.  The lowercase `-w` option probes
 the rejection path and expects the write to fail with `EROFS` or `EINVAL`.
 
+## Minimal Development Kernel
+
+`sys/arch/arm64/conf/ZBD` is a minimal kernel config for the QEMU virt VM:
+only the devices this VM uses (PL011 uart, ECAM PCIe via ACPI, virtio,
+NVMe/ZNS) plus FFS, ZLFS and the debug options, which makes cold builds and
+relinks several times faster than GENERIC.MP.  It also carries the arm64
+link floor -- SoC uarts, acpiec, com and i2c glue that `machdep.c`,
+`acpi.c` and `dsdt.c` reference unconditionally -- documented in the config.
+
+```sh
+cd /usr/src/sys/arch/arm64/compile/ZBD
+make obj && make config && make clean && make -j4
+doas make install && doas reboot
+```
+
+Plain `make` suffices after editing `.c` files; re-run
+`make config && make clean` only after changing the config file or
+`sys/conf/files`.  This kernel boots on the QEMU virt machine only.
+
 ## QEMU NVMe ZNS Target
 
 QEMU 11 can expose an emulated NVMe Zoned Namespace. The current development VM
@@ -265,37 +297,42 @@ that can present SCSI ZBC semantics.
 8. Validate zone reset/open/close/finish operations on SCSI ZBC and NVMe ZNS.
 9. Evaluate filesystem and buffer-cache implications before enabling general
    writable host-managed devices.
-10. Start a ZLFS prototype only after the raw write-pointer contract is stable.
+10. Grow ZLFS from the validated raw write-pointer contract: on-disk format
+    and `newfs_zlfs` are done; next are the in-kernel zone report API and a
+    read-only mount.
 
-## ZLFS Direction
+## ZLFS Status And Direction
 
-ZLFS is intentionally behind the raw write-pointer milestone.  The filesystem
-work should start only after the kernel and `dkzone-write-seq.sh` demonstrate:
+The raw write-pointer gate that ZLFS was waiting for is proven on the QEMU
+ZNS VM (reset -> write exactly at WP -> continue from cached WP -> report WP
+advanced -> reject stale write), so filesystem work has started:
 
-```text
-reset zone -> write exactly at WP -> continue from cached WP
-report WP advanced -> reject stale write
-```
+- The on-disk format lives in `sys/sys/zlfs.h`.  All multi-byte fields are
+  little-endian and every on-disk structure carries a CRC32C checksum.  The
+  superblock is a generation-numbered log ping-ponged across zones 0-1
+  rather than a rewrite-in-place block, because NVMe ZNS namespaces have no
+  conventional zones; the header documents append rules, mount discovery,
+  the block-size bootstrap, and the both-zones-full crash recovery case.
+- `sbin/newfs_zlfs` creates the filesystem today: it enumerates zones,
+  validates geometry, resets the superblock zones, and writes the
+  generation-0 superblock through the same gated raw write path the smoke
+  tests validate.  Run `newfs_zlfs -N sd1c` for a read-only dry run.
+- The kernel skeleton (`sys/zlfs/`) registers with the VFS but rejects all
+  operations, so an `option ZLFS` kernel is inert until mount lands.
 
-The QEMU ZNS VM now demonstrates that sequence with two consecutive 8-sector
-writes and a final reported write pointer of LBA 16.  The next confidence step
-is to repeat the same contract on a SCSI ZBC or host-managed SMR target.
+Remaining sequence to a usable filesystem:
 
-The first ZLFS prototype should be userland-first:
-
-1. Define an append-only record format with magic, type, length, generation,
-   and checksum.
-2. Build `zbfs_mkfs`, `zbfs_dump`, and `zbfs_check` against a scratch zoned
-   raw device.
-3. Write checkpoint records sequentially instead of assuming that zone 0 is
-   conventional.
-4. Add tiny userland file write/read tools over data, inode, directory, and
-   checkpoint records.
-5. Move to a read-only kernel mount only after crash recovery and checkpoint
-   scanning are understandable in userland.
-6. Add single-writer append support, then fsync/checkpoint, then cleaner
-   policy.
-7. Integrate with VFS and buffer cache only after write ordering is explicit
+1. In-kernel zone report API: the dkzone ioctls copy zone descriptors to
+   userland pointers, so `zlfs_mount` cannot reuse them; the report path
+   needs a kernel-buffer variant with the ioctls as thin wrappers.
+2. Read-only `zlfs_mount`: superblock-log discovery per `sys/sys/zlfs.h`,
+   mount argument plumbing (`struct zlfs_args`, `vfc_datasize`), and zone
+   allocator state initialized from a full zone report.
+3. Root vnode, `zlfs_vget`, and directory reads over the checkpoint and
+   inode map (their on-disk formats are the next format additions).
+4. Single-writer append support, then fsync/checkpoint, then cleaner
+   policy, with crash recovery exercised in the VM at each step.
+5. Integrate with the buffer cache only after write ordering is explicit
    and tested.
 
 ## Non-Goals For The Current Prototype
