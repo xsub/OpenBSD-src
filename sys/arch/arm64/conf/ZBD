@@ -1,0 +1,97 @@
+# $OpenBSD$
+#
+# ZBD -- minimal kernel for ZBD/ZLFS development in a QEMU arm64 VM.
+#
+# Standalone (does not include GENERIC) so unneeded filesystems,
+# network stacks and SoC drivers stay out of the build.  Device
+# coverage targets the QEMU "virt" machine only: PL011 uart, ECAM
+# PCIe, virtio (mmio and pci), and NVMe -- including ZNS namespaces,
+# which attach as zoned sd(4) disks.
+#
+#	cd ../compile/ZBD && make obj && make config && make
+
+machine		arm64
+maxusers	32
+
+option		MULTIPROCESSOR
+
+option		DDB		# in-kernel debugger
+option		DIAGNOSTIC	# internal consistency checks
+option		KTRACE		# system call tracing
+option		PTRACE		# ptrace(2)
+option		KMEMSTATS	# collect malloc(9) statistics
+option		POOL_DEBUG	# pool corruption detection
+option		CRYPTO		# cryptographic framework
+option		UVM_SWAP_ENCRYPT # encrypt pages going to swap
+option		SYSVMSG
+option		SYSVSEM
+option		SYSVSHM
+
+option		FFS		# UFS
+option		FFS2		# UFS2
+option		FIFO		# FIFOs; required
+option		ZLFS		# zoned log-structured file system
+
+option		INET6		# IPv6
+
+makeoptions	KERNEL_BASE_PHYS="0x00200000"
+makeoptions	KERNEL_BASE_VIRT="0xffffff8000200000"
+
+config		bsd	swap generic
+
+# The main bus device
+mainbus0	at root
+cpu0		at mainbus?
+cpu*		at mainbus?
+efi0		at mainbus?
+smbios0		at efi?
+apm0		at mainbus?
+
+# ACPI (QEMU provides tables when booted via UEFI)
+acpi0		at mainbus?
+acpicpu*	at acpi?
+acpipci*	at acpi?
+pci*		at acpipci?
+pluart*		at acpi?
+
+# FDT
+simplebus*	at fdt?
+psci*		at fdt? early 1
+ampintc*	at fdt? early 1
+ampintcmsi*	at fdt? early 1
+agintc*		at fdt? early 1
+agintcmsi*	at fdt? early 1
+agtimer*	at fdt?
+pluart*		at fdt?
+pciecam*	at fdt?
+pci*		at pciecam?
+simplefb*	at fdt?
+wsdisplay*	at simplefb?
+
+# virtio
+virtio*		at fdt?
+virtio*		at pci?
+vio*		at virtio?	# network
+vioblk*		at virtio?	# block
+viomb*		at virtio?	# memory ballooning
+viornd*		at virtio?	# entropy
+vioscsi*	at virtio?	# scsi
+viogpu*		at virtio?
+wsdisplay*	at viogpu?
+
+# Storage
+nvme*		at pci?		# NVMe, incl. ZNS namespaces
+softraid0	at root
+scsibus*	at softraid?
+scsibus*	at scsi?
+sd*		at scsibus?
+
+pseudo-device	loop		# network loopback
+pseudo-device	bpfilter	# packet filter captures
+pseudo-device	pf		# packet filter
+pseudo-device	pflog		# pf log if
+pseudo-device	pty	16	# initial number of pseudo-terminals
+pseudo-device	vnd	4	# vnode disk devices
+pseudo-device	ksyms	1	# kernel symbols device
+pseudo-device	kstat		# kernel statistics device
+pseudo-device	bio	1	# ioctl multiplexing device
