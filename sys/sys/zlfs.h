@@ -58,6 +58,7 @@
 
 /* Well-known inode numbers.  0 and 1 are reserved and never allocated. */
 #define ZLFS_ROOT_INO	2
+#define ZLFS_FIRST_INO	3	/* first allocatable inode number */
 
 /*
  * ZLFS Superblock.
@@ -158,6 +159,44 @@ struct zlfs_zone_summary {
 	u_int32_t	zz_num_blocks;	/* zone data capacity in blocks */
 	u_int32_t	zz_spare;
 	u_int64_t	zz_checksum;	/* UUID-seeded CRC32C, see above */
+};
+
+/*
+ * On-disk directory entry.  Directories are a flat array of fixed-size
+ * records so lookups and readdir need no length parsing; an unused
+ * slot has zd_ino == 0.  Names are not NUL-terminated on disk; only
+ * zd_namlen bytes of zd_name are valid.
+ */
+#define ZLFS_DIRENT_SIZE	128
+#define ZLFS_MAXNAMLEN		(ZLFS_DIRENT_SIZE - 16)	/* 112 */
+
+struct zlfs_dirent {
+	u_int64_t	zd_ino;		/* inode number, 0 if unused */
+	u_int8_t	zd_type;	/* DT_* from <sys/dirent.h> */
+	u_int8_t	zd_namlen;	/* <= ZLFS_MAXNAMLEN */
+	u_int8_t	zd_pad[6];
+	char		zd_name[ZLFS_MAXNAMLEN];
+};
+
+/*
+ * Checkpoint: the filesystem's mount entry point.  zs_checkpoint_lba
+ * in the superblock points at the newest checkpoint block.  The
+ * checkpoint locates the inode map -- a block-sized little-endian
+ * array of u_int64_t device LBAs indexed by inode number, where
+ * imap[ino] == 0 means the inode does not exist -- and names the root
+ * inode.  zc_checksum is CRC32C over the whole zs_block_size-sized
+ * block with zc_checksum taken as zero.
+ */
+struct zlfs_checkpoint {
+	u_int32_t	zc_magic;	/* ZLFS_MAGIC */
+	u_int32_t	zc_version;	/* ZLFS_VERSION */
+	u_int64_t	zc_generation;	/* matches the superblock generation */
+	u_int64_t	zc_root_ino;
+	u_int64_t	zc_imap_lba;	/* device LBA of the inode-map block */
+	u_int64_t	zc_ninodes;	/* number of inode-map entries */
+	u_int8_t	zc_uuid[16];	/* must match the superblock UUID */
+	u_int64_t	zc_reserved[4];
+	u_int64_t	zc_checksum;
 };
 
 #endif /* _SYS_ZLFS_H_ */

@@ -29,11 +29,14 @@ struct zlfs_zone_state {
 	u_int64_t	 zst_live_bytes; /* garbage collection heuristics */
 };
 
+struct zlfs_node;
+LIST_HEAD(zlfs_node_list, zlfs_node);
+
 struct zlfs_mount {
 	struct mount	*zm_mountp;
 	struct vnode	*zm_devvp;
-	struct rwlock	 zm_rootlk;	/* serialises root vnode creation */
-	struct vnode	*zm_rootvp;	/* cached root vnode, or NULL */
+	struct rwlock	 zm_lock;	/* guards zm_nodes and vnode creation */
+	struct zlfs_node_list zm_nodes;	/* active in-core inodes */
 	dev_t		 zm_dev;
 	struct zlfs_super zm_super;	/* host-endian superblock copy */
 	u_int32_t	 zm_secsize;	/* device sector (LBA) size */
@@ -41,14 +44,18 @@ struct zlfs_mount {
 	u_int64_t	 zm_nzones;	/* zones loaded into zm_zones */
 	time_t		 zm_ctime;	/* mount time, for synthetic attrs */
 	struct zlfs_zone_state *zm_zones;
+	u_int64_t	*zm_imap;	/* inode -> device LBA, or NULL */
+	u_int64_t	 zm_ninodes;	/* number of zm_imap entries */
 	struct netexport zm_export;
 };
 
 struct zlfs_node {
+	LIST_ENTRY(zlfs_node) zn_entry;	/* zm_nodes linkage */
 	struct rrwlock	 zn_lock;
 	struct vnode	*zn_vnode;
 	struct zlfs_mount *zn_zmp;
 	u_int64_t	 zn_ino;
+	int		 zn_onlist;	/* linked into zm_nodes? */
 	struct zlfs_inode zn_dinode;	/* host-endian inode copy */
 };
 
@@ -68,6 +75,10 @@ u_int32_t	zlfs_crc32c_update(u_int32_t, const void *, size_t);
 void		zlfs_sb_letoh(struct zlfs_super *, const struct zlfs_super *);
 int		zlfs_sb_discover(struct zlfs_mount *, const struct dk_zone *,
 		    struct proc *);
+int		zlfs_ckpt_load(struct zlfs_mount *);
+int		zlfs_read_dinode(struct zlfs_mount *, u_int64_t,
+		    struct zlfs_inode *);
+int		zlfs_bread_block(struct zlfs_mount *, u_int64_t, struct buf **);
 
 /* zlfs_alloc.c */
 int		zlfs_zones_load(struct zlfs_mount *);

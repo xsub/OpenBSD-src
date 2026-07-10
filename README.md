@@ -336,11 +336,16 @@ Done since:
 - A synthetic empty root directory (`sys/zlfs/zlfs_vnops.c`): `mount`,
   `ls`, `stat`, and `df` work; the volume is read-only.
 - `mount_zlfs(8)` userland helper.
+- Real on-disk inodes, directories, and files: `sys/sys/zlfs.h` defines
+  the checkpoint, inode-map, and fixed-size directory-entry formats
+  (little-endian, CRC32C); `newfs_zlfs` writes a root directory
+  containing a sample file, and the kernel reads it back through a
+  per-mount vnode cache -- `ls` lists real entries and `cat` returns
+  file data through the direct block pointers.
 
 Remaining sequence to a usable filesystem:
 
-1. On-disk checkpoint and inode map formats, then real `zlfs_vget` and
-   directory reads over them.
+1. Indirect block support and multi-block directories on the read path.
 2. Single-writer append support, then fsync/checkpoint, then cleaner
    policy, with crash recovery exercised in the VM at each step.
 3. Integrate with the buffer cache only after write ordering is explicit
