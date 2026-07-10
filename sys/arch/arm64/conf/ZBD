@@ -67,6 +67,7 @@ pluart*		at acpi?
 com*		at acpi?
 com*		at fdt?
 qcuart*		at acpi?
+qcuart*		at fdt?		# qcuart_init_cons lives in the fdt glue
 amluart*	at fdt?
 cduart*		at fdt?
 exuart*		at fdt?
