@@ -260,3 +260,152 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
 	zmp->zm_bshift = ffs(bsize) - 1;
 	return 0;
 }
+
+/*
+ * Read one filesystem block (zs_block_size bytes) at device LBA lba.
+ * Returns the buffer in *bpp on success; on error the buffer is
+ * released and *bpp is NULL.
+ */
+int
+zlfs_bread_block(struct zlfs_mount *zmp, u_int64_t lba, struct buf **bpp)
+{
+	struct buf *bp;
+	int error;
+
+	error = bread(zmp->zm_devvp, btodb(ZLFS_LBATOB(zmp, lba)),
+	    zmp->zm_super.zs_block_size, &bp);
+	if (error != 0) {
+		brelse(bp);
+		*bpp = NULL;
+		return error;
+	}
+	*bpp = bp;
+	return 0;
+}
+
+/* CRC32C over a block with the 8-byte checksum field at off taken as zero. */
+static int
+zlfs_block_csum_ok(const void *block, u_int32_t bsize, size_t off,
+    u_int64_t stored)
+{
+	static const u_int64_t zero64 = 0;
+	u_int32_t c;
+
+	c = ZLFS_CRC32C_INITIAL;
+	c = zlfs_crc32c_update(c, block, off);
+	c = zlfs_crc32c_update(c, &zero64, sizeof(zero64));
+	c = zlfs_crc32c_update(c, (const u_int8_t *)block + off + sizeof(zero64),
+	    bsize - off - sizeof(zero64));
+
+	return (u_int64_t)ZLFS_CRC32C_FINAL(c) == stored;
+}
+
+/*
+ * Load and validate the checkpoint named by zs_checkpoint_lba, then
+ * read its inode map into zmp->zm_imap.  The caller has already
+ * verified the superblock, so cross-check the checkpoint against it.
+ */
+int
+zlfs_ckpt_load(struct zlfs_mount *zmp)
+{
+	struct buf *bp;
+	const struct zlfs_checkpoint *dc;
+	u_int64_t gen, root_ino, imap_lba, ninodes, i, maxino;
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	int error;
+
+	maxino = bsize / sizeof(u_int64_t);
+
+	error = zlfs_bread_block(zmp, zmp->zm_super.zs_checkpoint_lba, &bp);
+	if (error != 0)
+		return error;
+
+	dc = (const struct zlfs_checkpoint *)bp->b_data;
+	if (letoh32(dc->zc_magic) != ZLFS_MAGIC ||
+	    letoh32(dc->zc_version) != ZLFS_VERSION ||
+	    !zlfs_block_csum_ok(bp->b_data, bsize,
+	    offsetof(struct zlfs_checkpoint, zc_checksum),
+	    letoh64(dc->zc_checksum)) ||
+	    memcmp(dc->zc_uuid, zmp->zm_super.zs_uuid,
+	    sizeof(dc->zc_uuid)) != 0) {
+		brelse(bp);
+		return EINVAL;
+	}
+
+	gen = letoh64(dc->zc_generation);
+	root_ino = letoh64(dc->zc_root_ino);
+	imap_lba = letoh64(dc->zc_imap_lba);
+	ninodes = letoh64(dc->zc_ninodes);
+	brelse(bp);
+
+	if (gen != zmp->zm_super.zs_generation ||
+	    root_ino != zmp->zm_super.zs_root_ino ||
+	    ninodes <= ZLFS_ROOT_INO || ninodes > maxino) {
+		return EINVAL;
+	}
+
+	error = zlfs_bread_block(zmp, imap_lba, &bp);
+	if (error != 0)
+		return error;
+
+	zmp->zm_imap = mallocarray(ninodes, sizeof(u_int64_t), M_ZLFS,
+	    M_WAITOK);
+	for (i = 0; i < ninodes; i++)
+		zmp->zm_imap[i] =
+		    letoh64(((u_int64_t *)bp->b_data)[i]);
+	zmp->zm_ninodes = ninodes;
+	brelse(bp);
+
+	return 0;
+}
+
+/*
+ * Read the on-disk inode for ino into *zi (host-endian).  Returns
+ * ENOENT for an out-of-range or absent inode.
+ */
+int
+zlfs_read_dinode(struct zlfs_mount *zmp, u_int64_t ino, struct zlfs_inode *zi)
+{
+	struct buf *bp;
+	const struct zlfs_inode *dip;
+	u_int64_t lba;
+	int error, i;
+
+	if (ino >= zmp->zm_ninodes)
+		return ENOENT;
+	lba = zmp->zm_imap[ino];
+	if (lba == 0)
+		return ENOENT;
+
+	error = zlfs_bread_block(zmp, lba, &bp);
+	if (error != 0)
+		return error;
+
+	dip = (const struct zlfs_inode *)bp->b_data;
+	memset(zi, 0, sizeof(*zi));
+	zi->zi_ino = letoh64(dip->zi_ino);
+	zi->zi_gen = letoh64(dip->zi_gen);
+	zi->zi_size = letoh64(dip->zi_size);
+	zi->zi_blocks = letoh64(dip->zi_blocks);
+	zi->zi_mode = letoh32(dip->zi_mode);
+	zi->zi_uid = letoh32(dip->zi_uid);
+	zi->zi_gid = letoh32(dip->zi_gid);
+	zi->zi_nlink = letoh32(dip->zi_nlink);
+	zi->zi_atime = letoh64(dip->zi_atime);
+	zi->zi_mtime = letoh64(dip->zi_mtime);
+	zi->zi_ctime = letoh64(dip->zi_ctime);
+	zi->zi_btime = letoh64(dip->zi_btime);
+	zi->zi_atimensec = letoh32(dip->zi_atimensec);
+	zi->zi_mtimensec = letoh32(dip->zi_mtimensec);
+	zi->zi_ctimensec = letoh32(dip->zi_ctimensec);
+	zi->zi_btimensec = letoh32(dip->zi_btimensec);
+	for (i = 0; i < ZLFS_NDADDR; i++)
+		zi->zi_db[i] = letoh64(dip->zi_db[i]);
+	for (i = 0; i < 3; i++)
+		zi->zi_ib[i] = letoh64(dip->zi_ib[i]);
+	brelse(bp);
+
+	if (zi->zi_ino != ino)
+		return EIO;
+	return 0;
+}

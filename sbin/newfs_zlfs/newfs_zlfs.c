@@ -32,14 +32,17 @@
 #include <sys/dkio.h>
 #include <sys/endian.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/zlfs.h>
 
+#include <dirent.h>
 #include <err.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <util.h>
 
@@ -47,6 +50,20 @@
 #define ZLFS_MAX_BLOCK_SIZE	65536
 #define ZLFS_REPORT_ENTRIES	256
 #define ZLFS_MAX_REPORT_PAGES	(1024 * 1024)
+
+/* Data-zone layout laid down by mkfs (block indices within the zone). */
+#define ZLFS_MKFS_SUMMARY	0
+#define ZLFS_MKFS_DIR		1
+#define ZLFS_MKFS_FILE		2
+#define ZLFS_MKFS_ROOTINO	3
+#define ZLFS_MKFS_FILEINO	4
+#define ZLFS_MKFS_IMAP		5
+#define ZLFS_MKFS_CKPT		6
+#define ZLFS_MKFS_NBLOCKS	7
+
+static const char zlfs_welcome[] =
+    "Welcome to ZLFS!\n"
+    "This file was written by newfs_zlfs(8) on a zoned block device.\n";
 
 struct zone_geometry {
 	u_int64_t	total_zones;
@@ -59,15 +76,20 @@ struct zone_geometry {
 static u_int32_t	crc32c_table[256];
 
 static void		crc32c_init(void);
+static u_int32_t	crc32c_add(u_int32_t, const void *, size_t);
 static u_int32_t	crc32c(const void *, size_t);
 static u_int32_t	device_secsize(int);
 static void		scan_zones(int, const char *, struct zone_geometry *);
 static void		zone_reset(int, const char *, u_int64_t);
 static void		zone_arm(int, const char *, u_int64_t);
 static void		build_super(struct zlfs_super *, u_int32_t,
-			    const struct zone_geometry *, const u_int8_t *);
-static void		write_super(int, const char *, const void *, size_t);
-static void		verify_super(int, const char *, const void *, size_t);
+			    const struct zone_geometry *, const u_int8_t *,
+			    u_int64_t);
+static void		write_block(int, const char *, u_int64_t, u_int32_t,
+			    const void *, u_int32_t);
+static void		write_filesystem(int, const char *,
+			    const struct zone_geometry *, const u_int8_t *,
+			    u_int32_t, u_int32_t, int);
 static void __dead	usage(void);
 
 static void
@@ -85,15 +107,20 @@ crc32c_init(void)
 }
 
 static u_int32_t
-crc32c(const void *buf, size_t len)
+crc32c_add(u_int32_t c, const void *buf, size_t len)
 {
 	const u_int8_t *p = buf;
-	u_int32_t c = 0xffffffff;
 
 	while (len-- > 0)
 		c = crc32c_table[(c ^ *p++) & 0xff] ^ (c >> 8);
 
-	return c ^ 0xffffffff;
+	return c;
+}
+
+static u_int32_t
+crc32c(const void *buf, size_t len)
+{
+	return crc32c_add(0xffffffff, buf, len) ^ 0xffffffff;
 }
 
 static u_int32_t
@@ -268,7 +295,8 @@ zone_arm(int fd, const char *path, u_int64_t start_lba)
 
 static void
 build_super(struct zlfs_super *zs, u_int32_t block_size,
-    const struct zone_geometry *g, const u_int8_t *uuid)
+    const struct zone_geometry *g, const u_int8_t *uuid,
+    u_int64_t checkpoint_lba)
 {
 	memset(zs, 0, sizeof(*zs));
 	zs->zs_magic = htole32(ZLFS_MAGIC);
@@ -280,44 +308,179 @@ build_super(struct zlfs_super *zs, u_int32_t block_size,
 	zs->zs_zone_cap_lba = htole64(g->min_cap_lba);
 	zs->zs_total_zones = htole64(g->total_zones);
 	zs->zs_generation = htole64(0);
-	zs->zs_checkpoint_lba = htole64(0);	/* no checkpoint yet */
+	zs->zs_checkpoint_lba = htole64(checkpoint_lba);
 	zs->zs_root_ino = htole64(ZLFS_ROOT_INO);
 	zs->zs_last_mount_time = htole64(0);	/* never mounted */
 }
 
 static void
-write_super(int fd, const char *path, const void *buf, size_t block_size)
+write_block(int fd, const char *path, u_int64_t lba, u_int32_t secsize,
+    const void *buf, u_int32_t block_size)
 {
+	off_t off = (off_t)lba * secsize;
 	ssize_t n;
 
-	n = pwrite(fd, buf, block_size, 0);
+	n = pwrite(fd, buf, block_size, off);
 	if (n == -1)
 		err(1, "pwrite %s", path);
 	if ((size_t)n != block_size)
-		errx(1, "%s: short superblock write (%zd of %zu bytes)",
-		    path, n, block_size);
+		errx(1, "%s: short write at lba %llu (%zd of %u bytes)",
+		    path, (unsigned long long)lba, n, block_size);
 }
 
 static void
-verify_super(int fd, const char *path, const void *expect, size_t block_size)
+build_inode(struct zlfs_inode *zi, u_int64_t ino, u_int32_t mode,
+    u_int32_t nlink, u_int64_t size, u_int64_t data_lba, u_int64_t now)
 {
-	void *buf;
-	ssize_t n;
+	memset(zi, 0, sizeof(*zi));
+	zi->zi_ino = htole64(ino);
+	zi->zi_gen = htole64(1);
+	zi->zi_size = htole64(size);
+	zi->zi_blocks = htole64(size == 0 ? 0 : 1);
+	zi->zi_mode = htole32(mode);
+	zi->zi_nlink = htole32(nlink);
+	zi->zi_atime = zi->zi_mtime = zi->zi_ctime = zi->zi_btime =
+	    htole64(now);
+	if (data_lba != 0)
+		zi->zi_db[0] = htole64(data_lba);
+}
 
-	buf = malloc(block_size);
-	if (buf == NULL)
-		err(1, "malloc");
+static void
+put_dirent(void *slot, u_int64_t ino, u_int8_t type, const char *name)
+{
+	struct zlfs_dirent zd;
+	size_t namlen = strlen(name);
 
-	n = pread(fd, buf, block_size, 0);
-	if (n == -1)
-		err(1, "pread %s", path);
-	if ((size_t)n != block_size)
-		errx(1, "%s: short superblock read (%zd of %zu bytes)",
-		    path, n, block_size);
-	if (memcmp(buf, expect, block_size) != 0)
-		errx(1, "%s: superblock verify failed", path);
+	memset(&zd, 0, sizeof(zd));
+	zd.zd_ino = htole64(ino);
+	zd.zd_type = type;
+	zd.zd_namlen = (u_int8_t)namlen;
+	memcpy(zd.zd_name, name, namlen);
+	memcpy(slot, &zd, sizeof(zd));
+}
 
-	free(buf);
+/*
+ * Lay down a minimal but real filesystem in the first data zone: a
+ * zone summary, a root directory containing one regular file, the file
+ * data, the two inodes, an inode map, and a checkpoint.  Then write
+ * the generation-0 superblock pointing at the checkpoint.
+ */
+static void
+write_filesystem(int fd, const char *path, const struct zone_geometry *g,
+    const u_int8_t *uuid, u_int32_t block_size, u_int32_t secsize, int quiet)
+{
+	struct zlfs_super zs;
+	struct zlfs_zone_summary zsum;
+	struct zlfs_checkpoint zc;
+	struct zlfs_inode zi;
+	u_int8_t *blk;
+	u_int64_t bpb = block_size / secsize;
+	u_int64_t dzs = (u_int64_t)ZLFS_SB_ZONES * g->zone_size_lba;
+	u_int64_t lba[ZLFS_MKFS_NBLOCKS];
+	u_int64_t now = (u_int64_t)time(NULL);
+	u_int32_t crc, i;
+	size_t filelen = sizeof(zlfs_welcome) - 1;
+
+	if (g->min_cap_lba < (u_int64_t)ZLFS_MKFS_NBLOCKS * bpb)
+		errx(1, "%s: data zone too small for the filesystem layout",
+		    path);
+	if (filelen > block_size)
+		errx(1, "%s: sample file larger than one block", path);
+
+	for (i = 0; i < ZLFS_MKFS_NBLOCKS; i++)
+		lba[i] = dzs + (u_int64_t)i * bpb;
+
+	blk = calloc(1, block_size);
+	if (blk == NULL)
+		err(1, "calloc");
+
+	/* Reset the superblock zones and the first data zone. */
+	zone_reset(fd, path, g->sb_zone_start[1]);
+	zone_reset(fd, path, g->sb_zone_start[0]);
+	zone_reset(fd, path, dzs);
+
+	/* Fill the data zone sequentially from its write pointer. */
+	zone_arm(fd, path, dzs);
+
+	/* Block 0: zone summary. */
+	memset(blk, 0, block_size);
+	memset(&zsum, 0, sizeof(zsum));
+	zsum.zz_magic = htole32(ZLFS_MAGIC);
+	zsum.zz_seq_num = htole64(0);
+	zsum.zz_zone_start_lba = htole64(dzs);
+	zsum.zz_num_blocks = htole32((u_int32_t)(g->min_cap_lba / bpb));
+	crc = crc32c_add(0xffffffff, uuid, 16);
+	crc = crc32c_add(crc, &zsum, sizeof(zsum)) ^ 0xffffffff;
+	zsum.zz_checksum = htole64(crc);
+	memcpy(blk, &zsum, sizeof(zsum));
+	write_block(fd, path, lba[ZLFS_MKFS_SUMMARY], secsize, blk, block_size);
+
+	/* Block 1: root directory. */
+	memset(blk, 0, block_size);
+	put_dirent(blk + 0 * ZLFS_DIRENT_SIZE, ZLFS_ROOT_INO, DT_DIR, ".");
+	put_dirent(blk + 1 * ZLFS_DIRENT_SIZE, ZLFS_ROOT_INO, DT_DIR, "..");
+	put_dirent(blk + 2 * ZLFS_DIRENT_SIZE, ZLFS_FIRST_INO, DT_REG,
+	    "welcome");
+	write_block(fd, path, lba[ZLFS_MKFS_DIR], secsize, blk, block_size);
+
+	/* Block 2: file data. */
+	memset(blk, 0, block_size);
+	memcpy(blk, zlfs_welcome, filelen);
+	write_block(fd, path, lba[ZLFS_MKFS_FILE], secsize, blk, block_size);
+
+	/* Block 3: root inode. */
+	memset(blk, 0, block_size);
+	build_inode(&zi, ZLFS_ROOT_INO, S_IFDIR | 0755, 2,
+	    3 * ZLFS_DIRENT_SIZE, lba[ZLFS_MKFS_DIR], now);
+	memcpy(blk, &zi, sizeof(zi));
+	write_block(fd, path, lba[ZLFS_MKFS_ROOTINO], secsize, blk, block_size);
+
+	/* Block 4: file inode. */
+	memset(blk, 0, block_size);
+	build_inode(&zi, ZLFS_FIRST_INO, S_IFREG | 0644, 1, filelen,
+	    lba[ZLFS_MKFS_FILE], now);
+	memcpy(blk, &zi, sizeof(zi));
+	write_block(fd, path, lba[ZLFS_MKFS_FILEINO], secsize, blk, block_size);
+
+	/* Block 5: inode map (imap[ino] = inode block LBA). */
+	memset(blk, 0, block_size);
+	htolem64((u_int64_t *)(blk + ZLFS_ROOT_INO * sizeof(u_int64_t)),
+	    lba[ZLFS_MKFS_ROOTINO]);
+	htolem64((u_int64_t *)(blk + ZLFS_FIRST_INO * sizeof(u_int64_t)),
+	    lba[ZLFS_MKFS_FILEINO]);
+	write_block(fd, path, lba[ZLFS_MKFS_IMAP], secsize, blk, block_size);
+
+	/* Block 6: checkpoint. */
+	memset(blk, 0, block_size);
+	memset(&zc, 0, sizeof(zc));
+	zc.zc_magic = htole32(ZLFS_MAGIC);
+	zc.zc_version = htole32(ZLFS_VERSION);
+	zc.zc_generation = htole64(0);
+	zc.zc_root_ino = htole64(ZLFS_ROOT_INO);
+	zc.zc_imap_lba = htole64(lba[ZLFS_MKFS_IMAP]);
+	zc.zc_ninodes = htole64(ZLFS_FIRST_INO + 1);
+	memcpy(zc.zc_uuid, uuid, sizeof(zc.zc_uuid));
+	memcpy(blk, &zc, sizeof(zc));
+	crc = crc32c(blk, block_size);
+	((struct zlfs_checkpoint *)blk)->zc_checksum = htole64(crc);
+	write_block(fd, path, lba[ZLFS_MKFS_CKPT], secsize, blk, block_size);
+
+	/* Finally the superblock, pointing at the checkpoint. */
+	zone_reset(fd, path, g->sb_zone_start[0]);
+	zone_arm(fd, path, g->sb_zone_start[0]);
+	memset(blk, 0, block_size);
+	build_super(&zs, block_size, g, uuid, lba[ZLFS_MKFS_CKPT]);
+	memcpy(blk, &zs, sizeof(zs));
+	crc = crc32c(blk, block_size);
+	((struct zlfs_super *)blk)->zs_checksum = htole64(crc);
+	write_block(fd, path, g->sb_zone_start[0], secsize, blk, block_size);
+
+	free(blk);
+
+	if (!quiet)
+		printf("superblock generation 0 written to zone 0, "
+		    "checkpoint at lba %llu, root + 1 file\n",
+		    (unsigned long long)lba[ZLFS_MKFS_CKPT]);
 }
 
 static void __dead
@@ -333,12 +496,11 @@ main(int argc, char *argv[])
 {
 	struct dk_zone_info info;
 	struct zone_geometry g;
-	struct zlfs_super zs;
 	const char *errstr, *path;
 	char *realname = NULL;
-	u_int8_t *block, uuid[16];
+	u_int8_t uuid[16];
 	u_int64_t cap_bytes;
-	u_int32_t block_size = ZLFS_DFL_BLOCK_SIZE, crc, secsize;
+	u_int32_t block_size = ZLFS_DFL_BLOCK_SIZE, secsize;
 	int ch, fd, i, dryrun = 0, quiet = 0;
 
 	while ((ch = getopt(argc, argv, "Nb:q")) != -1) {
@@ -427,32 +589,13 @@ main(int argc, char *argv[])
 		return 0;
 	}
 
-	block = calloc(1, block_size);
-	if (block == NULL)
-		err(1, "calloc");
-
-	build_super(&zs, block_size, &g, uuid);
-	memcpy(block, &zs, sizeof(zs));
-	crc = crc32c(block, block_size);
-	((struct zlfs_super *)block)->zs_checksum = htole64(crc);
-
 	/*
-	 * Zone 1 is reset (left empty) so superblock discovery is
-	 * unambiguous: generation 0 lives in zone 0 only.  The write
-	 * gate requires a fresh zone report after each reset before
-	 * it admits the sequential write at the write pointer.
+	 * Zone 1 is left empty so superblock discovery is unambiguous:
+	 * generation 0 lives in zone 0 only.  The data zone is written
+	 * first so the superblock can point at the checkpoint.
 	 */
-	zone_reset(fd, path, g.sb_zone_start[1]);
-	zone_reset(fd, path, g.sb_zone_start[0]);
-	zone_arm(fd, path, g.sb_zone_start[0]);
-	write_super(fd, path, block, block_size);
-	verify_super(fd, path, block, block_size);
+	write_filesystem(fd, path, &g, uuid, block_size, secsize, quiet);
 
-	if (!quiet)
-		printf("superblock generation 0 written to zone 0, "
-		    "zone 1 reserved\n");
-
-	free(block);
 	close(fd);
 	return 0;
 }

@@ -149,7 +149,8 @@ zlfs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p,
 	}
 
 	zmp = malloc(sizeof(*zmp), M_ZLFS, M_WAITOK | M_ZERO);
-	rw_init(&zmp->zm_rootlk, "zlfsroot");
+	rw_init(&zmp->zm_lock, "zlfs");
+	LIST_INIT(&zmp->zm_nodes);
 	zmp->zm_devvp = devvp;
 	zmp->zm_dev = dev;
 	zmp->zm_secsize = dl.d_secsize;
@@ -191,6 +192,18 @@ zlfs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p,
 	if (error != 0)
 		goto out;
 
+	/*
+	 * A nonzero checkpoint pointer names a real filesystem image;
+	 * load its inode map.  A zero pointer is a superblock-only image
+	 * (older newfs_zlfs), which mounts with just a synthetic empty
+	 * root directory.
+	 */
+	if (zmp->zm_super.zs_checkpoint_lba != 0) {
+		error = zlfs_ckpt_load(zmp);
+		if (error != 0)
+			goto out;
+	}
+
 	zmp->zm_mountp = mp;
 	zmp->zm_ctime = gettime();
 
@@ -213,6 +226,9 @@ out:
 	VOP_UNLOCK(devvp);
 
 	if (zmp != NULL) {
+		if (zmp->zm_imap != NULL)
+			free(zmp->zm_imap, M_ZLFS,
+			    zmp->zm_ninodes * sizeof(u_int64_t));
 		zlfs_zones_free(zmp);
 		free(zmp, M_ZLFS, sizeof(*zmp));
 		mp->mnt_data = NULL;
@@ -245,6 +261,9 @@ zlfs_unmount(struct mount *mp, int mntflags, struct proc *p)
 	(void)VOP_CLOSE(zmp->zm_devvp, FREAD, NOCRED, p);
 	vput(zmp->zm_devvp);
 
+	if (zmp->zm_imap != NULL)
+		free(zmp->zm_imap, M_ZLFS,
+		    zmp->zm_ninodes * sizeof(u_int64_t));
 	zlfs_zones_free(zmp);
 	free(zmp, M_ZLFS, sizeof(*zmp));
 	mp->mnt_data = NULL;
@@ -296,42 +315,71 @@ zlfs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred,
 }
 
 /*
- * Until the checkpoint and inode map formats exist, the only inode is
- * a synthetic empty root directory.
+ * Build the synthetic-root inode used for a superblock-only image
+ * (no checkpoint): an empty directory owned by root.
+ */
+static void
+zlfs_synth_root(struct zlfs_mount *zmp, struct zlfs_inode *zi)
+{
+	memset(zi, 0, sizeof(*zi));
+	zi->zi_ino = ZLFS_ROOT_INO;
+	zi->zi_gen = 1;
+	zi->zi_mode = S_IFDIR | 0755;
+	zi->zi_nlink = 2;
+	zi->zi_size = 0;
+	zi->zi_atime = zi->zi_mtime = zi->zi_ctime = zi->zi_btime =
+	    zmp->zm_ctime;
+}
+
+/*
+ * Look up (or create) the vnode for an inode number, caching active
+ * in-core inodes on zm_nodes.  The vnode-cache dance mirrors the
+ * ufs/tmpfs pattern: never hold zm_lock across getnewvnode(), and
+ * re-check for a racing insert before publishing.
  */
 int
 zlfs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 {
 	struct zlfs_mount *zmp = VFSTOZLFS(mp);
-	struct zlfs_node *znp;
-	struct zlfs_inode *zi;
+	struct zlfs_node *znp, *other;
+	struct zlfs_inode dinode;
 	struct vnode *vp;
 	int error;
 
-	if (ino != ZLFS_ROOT_INO)
-		return ENOENT;
+	*vpp = NULL;
 
-again:
-	if (zmp->zm_rootvp != NULL) {
-		vp = zmp->zm_rootvp;
-		if (vget(vp, LK_EXCLUSIVE) != 0)
-			goto again;
+	/* Fetch the on-disk inode (or synthesise the root). */
+	if (zmp->zm_imap != NULL) {
+		error = zlfs_read_dinode(zmp, ino, &dinode);
+		if (error != 0)
+			return error;
+	} else {
+		if (ino != ZLFS_ROOT_INO)
+			return ENOENT;
+		zlfs_synth_root(zmp, &dinode);
+	}
+
+loop:
+	rw_enter_write(&zmp->zm_lock);
+	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
+		if (znp->zn_ino != ino)
+			continue;
+		vp = znp->zn_vnode;
+		rw_exit_write(&zmp->zm_lock);
+		error = vget(vp, LK_EXCLUSIVE);
+		if (error == ENOENT)
+			goto loop;	/* being reclaimed; retry */
+		if (error != 0)
+			return error;
 		*vpp = vp;
 		return 0;
 	}
+	rw_exit_write(&zmp->zm_lock);
 
-	/* Serialise creation so only one root vnode is ever published. */
-	rw_enter_write(&zmp->zm_rootlk);
-	if (zmp->zm_rootvp != NULL) {
-		rw_exit_write(&zmp->zm_rootlk);
-		goto again;
-	}
-
+	/* Not cached: create a fresh vnode without holding zm_lock. */
 	error = getnewvnode(VT_ZLFS, mp, &zlfs_vops, &vp);
-	if (error != 0) {
-		rw_exit_write(&zmp->zm_rootlk);
+	if (error != 0)
 		return error;
-	}
 
 	znp = malloc(sizeof(*znp), M_ZLFS, M_WAITOK | M_ZERO);
 	rrw_init_flags(&znp->zn_lock, "zlfsinode", RWL_DUPOK | RWL_IS_VNODE);
@@ -339,22 +387,29 @@ again:
 	znp->zn_vnode = vp;
 	znp->zn_zmp = zmp;
 	znp->zn_ino = ino;
+	znp->zn_dinode = dinode;
+	vp->v_type = IFTOVT(dinode.zi_mode);
 
-	zi = &znp->zn_dinode;
-	zi->zi_ino = ino;
-	zi->zi_gen = 1;
-	zi->zi_mode = S_IFDIR | 0755;
-	zi->zi_nlink = 2;
-	zi->zi_size = zmp->zm_super.zs_block_size;
-	zi->zi_atime = zi->zi_mtime = zi->zi_ctime = zi->zi_btime =
-	    zmp->zm_ctime;
-
-	vp->v_type = VDIR;
-	vp->v_flag |= VROOT;
+	/* Publish, unless another thread beat us to this inode. */
+	rw_enter_write(&zmp->zm_lock);
+	LIST_FOREACH(other, &zmp->zm_nodes, zn_entry) {
+		if (other->zn_ino == ino)
+			break;
+	}
+	if (other != NULL) {
+		rw_exit_write(&zmp->zm_lock);
+		/* znp was never linked (zn_onlist == 0); dispose safely. */
+		vp->v_type = VNON;
+		vrele(vp);
+		goto loop;
+	}
+	if (ino == ZLFS_ROOT_INO)
+		vp->v_flag |= VROOT;
+	LIST_INSERT_HEAD(&zmp->zm_nodes, znp, zn_entry);
+	znp->zn_onlist = 1;
+	rw_exit_write(&zmp->zm_lock);
 
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	zmp->zm_rootvp = vp;
-	rw_exit_write(&zmp->zm_rootlk);
 	*vpp = vp;
 	return 0;
 }
