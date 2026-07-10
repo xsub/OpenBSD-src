@@ -1,0 +1,57 @@
+.\"	$OpenBSD$
+.\"
+.\" Copyright (c) 2026 Pawel Suchanecki <subdcc@gmail.com>
+.\"
+.\" Permission to use, copy, modify, and distribute this software for any
+.\" purpose with or without fee is hereby granted, provided that the above
+.\" copyright notice and this permission notice appear in all copies.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+.\" WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+.\" MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+.\" ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+.\" WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+.\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+.\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+.\"
+.Dd $Mdocdate: July 10 2026 $
+.Dt MOUNT_ZLFS 8
+.Os
+.Sh NAME
+.Nm mount_zlfs
+.Nd mount a ZLFS (zoned log-structured) file system
+.Sh SYNOPSIS
+.Nm
+.Op Fl o Ar options
+.Ar special node
+.Sh DESCRIPTION
+.Nm
+attaches the experimental ZLFS file system residing on the zoned
+block device
+.Ar special
+to the global file system namespace at the location indicated by
+.Ar node .
+The device must hold a file system created by
+.Xr newfs_zlfs 8 .
+.Pp
+ZLFS is under development and currently mounts read-only; the root
+directory is empty until the on-disk checkpoint format lands.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl o Ar options
+Options are specified with a
+.Fl o
+flag followed by a comma separated string of options; see
+.Xr mount 8
+for possible options and their meanings.
+.El
+.Sh SEE ALSO
+.Xr mount 2 ,
+.Xr unmount 2 ,
+.Xr mount 8 ,
+.Xr newfs_zlfs 8
+.Sh HISTORY
+.Nm
+first appeared in an experimental OpenBSD fork for zoned block device
+support.

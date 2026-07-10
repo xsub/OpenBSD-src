@@ -136,6 +136,19 @@ struct dk_zone_report {
 	u_int64_t	dzr_reserved[8];
 };
 
+#ifdef _KERNEL
+/*
+ * In-kernel zone reporting for filesystem consumers.  Fills up to
+ * nzones descriptors into the kernel array starting at start_lba,
+ * paging through device reports internally; *filled receives the
+ * number of descriptors written (fewer than nzones at end of device).
+ * Unlike DIOCGZONEREPORT this never touches the sd(4) raw-write-gate
+ * zone cache.  The device must be an sd(4) disk.
+ */
+int	dk_zone_report_kern(dev_t, u_int64_t, struct dk_zone *, u_int32_t,
+	    u_int32_t *);
+#endif /* _KERNEL */
+
 struct dk_zone_op {
 	u_int32_t	dzo_version;
 	u_int32_t	dzo_op;

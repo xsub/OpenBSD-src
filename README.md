@@ -320,19 +320,30 @@ advanced -> reject stale write), so filesystem work has started:
 - The kernel skeleton (`sys/zlfs/`) registers with the VFS but rejects all
   operations, so an `option ZLFS` kernel is inert until mount lands.
 
+Done since:
+
+- In-kernel zone report API: `dk_zone_report_kern()` (`sys/scsi/sd.c`)
+  dispatches to an optional `dev_zone_report` adapter op (NVMe ZNS in
+  `sys/dev/ic/nvme.c`) or the native SCSI ZBC path, filling `struct
+  dk_zone` arrays into kernel buffers without touching the raw-write
+  gate cache.  The `DIOCGZONEREPORT` ioctl and the filesystem now share
+  the same report core.
+- Read-only `zlfs_mount` (`sys/zlfs/zlfs_vfsops.c`): superblock-log
+  discovery per `sys/sys/zlfs.h`, mount arguments (`struct zlfs_args`),
+  and per-zone allocator state loaded through the kernel report API.
+  The mount validates the superblock against device geometry and bounds
+  every attacker-controllable field before use.
+- A synthetic empty root directory (`sys/zlfs/zlfs_vnops.c`): `mount`,
+  `ls`, `stat`, and `df` work; the volume is read-only.
+- `mount_zlfs(8)` userland helper.
+
 Remaining sequence to a usable filesystem:
 
-1. In-kernel zone report API: the dkzone ioctls copy zone descriptors to
-   userland pointers, so `zlfs_mount` cannot reuse them; the report path
-   needs a kernel-buffer variant with the ioctls as thin wrappers.
-2. Read-only `zlfs_mount`: superblock-log discovery per `sys/sys/zlfs.h`,
-   mount argument plumbing (`struct zlfs_args`, `vfc_datasize`), and zone
-   allocator state initialized from a full zone report.
-3. Root vnode, `zlfs_vget`, and directory reads over the checkpoint and
-   inode map (their on-disk formats are the next format additions).
-4. Single-writer append support, then fsync/checkpoint, then cleaner
+1. On-disk checkpoint and inode map formats, then real `zlfs_vget` and
+   directory reads over them.
+2. Single-writer append support, then fsync/checkpoint, then cleaner
    policy, with crash recovery exercised in the VM at each step.
-5. Integrate with the buffer cache only after write ordering is explicit
+3. Integrate with the buffer cache only after write ordering is explicit
    and tested.
 
 ## Non-Goals For The Current Prototype

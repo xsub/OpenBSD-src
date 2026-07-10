@@ -105,6 +105,8 @@ int	nvme_zns_ioctl_zonereport(struct nvme_softc *, struct scsi_link *,
 	    struct dk_zone_report *);
 int	nvme_zns_ioctl_zonecmd(struct nvme_softc *, struct scsi_link *,
 	    struct dk_zone_op *);
+int	nvme_zns_zone_report_kern(struct scsi_link *, u_int64_t,
+	    struct dk_zone *, u_int32_t, u_int32_t *);
 int	nvme_zns_report_zones(struct nvme_softc *, struct scsi_link *,
 	    u_int64_t, u_int8_t, void *, u_int32_t);
 int	nvme_zns_zone_mgmt_send(struct nvme_softc *, struct scsi_link *,
@@ -131,7 +133,7 @@ int	nvme_bioctl_disk(struct nvme_softc *, struct bioc_disk *);
 
 const struct scsi_adapter nvme_switch = {
 	nvme_scsi_cmd, nvme_minphys, nvme_scsi_probe, nvme_scsi_free,
-	nvme_scsi_ioctl
+	nvme_scsi_ioctl, nvme_zns_zone_report_kern
 };
 
 void	nvme_scsi_io(struct scsi_xfer *, int);
@@ -1352,6 +1354,95 @@ nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
 	if (error == 0 && cache_zone_valid && link->device_softc != NULL)
 		sd_zoned_cache_update((struct sd_softc *)link->device_softc,
 		    &cache_zone);
+
+done:
+	dma_free(buf, buflen);
+	return error;
+}
+
+/*
+ * In-kernel zone report for filesystem consumers: fill up to nzones
+ * descriptors into a kernel array, paging through the device report
+ * internally.  Deliberately does not touch the sd(4) write-gate zone
+ * cache.
+ */
+int
+nvme_zns_zone_report_kern(struct scsi_link *link, u_int64_t start_lba,
+    struct dk_zone *zones, u_int32_t nzones, u_int32_t *filled)
+{
+	struct nvme_softc		*sc = link->bus->sb_adapter_softc;
+	struct nvme_namespace		*ns = &sc->sc_namespaces[link->target];
+	struct nvm_identify_namespace	*ident = ns->ident;
+	struct nvm_identify_namespace_zns
+					*zns = ns->zns;
+	struct nvm_zns_zone_report	*hdr;
+	struct nvm_zns_zone_desc	*desc;
+	struct dk_zone			*zone;
+	u_int64_t			 nzones_hdr, zone_size_lba, max_lba;
+	u_int32_t			 buflen, bufzones, got, maxentries, i;
+	u_int				 flbas;
+	void				*buf;
+	int				 error = 0;
+
+	*filled = 0;
+	if (ident == NULL || zns == NULL)
+		return EOPNOTSUPP;
+	if (nzones == 0)
+		return EINVAL;
+	if (sc->sc_mps < sizeof(*hdr))
+		return EIO;
+
+	maxentries = (sc->sc_mps - sizeof(*hdr)) / sizeof(*desc);
+	flbas = NVME_ID_NS_FLBAS(ident->flbas);
+	zone_size_lba = lemtoh64(&zns->lbafe[flbas].zsze);
+	max_lba = nvme_scsi_size(ident) - 1;
+
+	bufzones = MIN(nzones, maxentries);
+	buflen = sizeof(*hdr) + bufzones * sizeof(*desc);
+	buf = dma_alloc(buflen, PR_WAITOK | PR_ZERO);
+	if (buf == NULL)
+		return ENOMEM;
+	hdr = buf;
+	desc = hdr->desc;
+
+	while (*filled < nzones && start_lba <= max_lba) {
+		rw_enter_write(&sc->sc_lock);
+		error = nvme_zns_report_zones(sc, link, start_lba,
+		    NVM_ZNS_ZRAS_REPORT_ALL, buf, buflen);
+		rw_exit_write(&sc->sc_lock);
+		if (error != 0)
+			break;
+
+		/*
+		 * hdr->nzones is a device-controlled count; clamp it to
+		 * both the caller's remaining space and the number of
+		 * descriptors that actually fit in the DMA buffer so a
+		 * misbehaving controller cannot drive an out-of-bounds
+		 * read of desc[].
+		 */
+		nzones_hdr = lemtoh64(&hdr->nzones);
+		got = nzones - *filled;
+		if (nzones_hdr < got)
+			got = nzones_hdr;
+		if (bufzones < got)
+			got = bufzones;
+		if (got == 0)
+			break;
+
+		for (i = 0; i < got; i++) {
+			zone = &zones[*filled];
+			nvme_zns_zone_from_desc(zone, &desc[i],
+			    zone_size_lba);
+			if (zone->dz_length_lba == 0 ||
+			    zone->dz_start_lba >
+			    UINT64_MAX - zone->dz_length_lba) {
+				error = EIO;
+				goto done;
+			}
+			start_lba = zone->dz_start_lba + zone->dz_length_lba;
+			(*filled)++;
+		}
+	}
 
 done:
 	dma_free(buf, buflen);

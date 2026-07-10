@@ -264,6 +264,14 @@ struct fusefs_args {
 #define	MFSNAMELEN	16	/* length of fs type name, including nul */
 #define	MNAMELEN	90	/* length of buffer for returned name */
 
+/*
+ * Arguments to mount ZLFS (zoned log-structured) filesystems.
+ */
+struct zlfs_args {
+	char	*fspec;			/* zoned block device to mount */
+	struct	export_args export_info; /* network export information */
+};
+
 /* per-filesystem mount options */
 union mount_info {
 	struct ufs_args ufs_args;
@@ -273,6 +281,7 @@ union mount_info {
 	struct msdosfs_args msdosfs_args;
 	struct ntfs_args ntfs_args;
 	struct tmpfs_args tmpfs_args;
+	struct zlfs_args zlfs_args;
 	char __align[160];	/* 64-bit alignment and room to grow */
 };
 
