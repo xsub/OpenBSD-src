@@ -32,7 +32,7 @@ static u_int32_t zlfs_crc32c_table[256];
 static u_int32_t	zlfs_sb_probe(const void *, u_int32_t);
 static int		zlfs_sb_block_valid(const void *, u_int32_t);
 static int		zlfs_sb_try(struct zlfs_mount *, u_int64_t, u_int32_t,
-			    struct zlfs_super *, u_int64_t *, int *);
+			    int, struct zlfs_super *, u_int64_t *, int *, int *);
 
 void
 zlfs_crc32c_init(void)
