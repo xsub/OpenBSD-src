@@ -81,6 +81,35 @@ zlfs_sb_letoh(struct zlfs_super *h, const struct zlfs_super *le)
 	h->zs_checksum = letoh64(le->zs_checksum);
 }
 
+/* Serialise a host-endian inode into its little-endian on-disk form. */
+void
+zlfs_inode_htole(struct zlfs_inode *le, const struct zlfs_inode *h)
+{
+	int i;
+
+	memset(le, 0, sizeof(*le));
+	le->zi_ino = htole64(h->zi_ino);
+	le->zi_gen = htole64(h->zi_gen);
+	le->zi_size = htole64(h->zi_size);
+	le->zi_blocks = htole64(h->zi_blocks);
+	le->zi_mode = htole32(h->zi_mode);
+	le->zi_uid = htole32(h->zi_uid);
+	le->zi_gid = htole32(h->zi_gid);
+	le->zi_nlink = htole32(h->zi_nlink);
+	le->zi_atime = htole64(h->zi_atime);
+	le->zi_mtime = htole64(h->zi_mtime);
+	le->zi_ctime = htole64(h->zi_ctime);
+	le->zi_btime = htole64(h->zi_btime);
+	le->zi_atimensec = htole32(h->zi_atimensec);
+	le->zi_mtimensec = htole32(h->zi_mtimensec);
+	le->zi_ctimensec = htole32(h->zi_ctimensec);
+	le->zi_btimensec = htole32(h->zi_btimensec);
+	for (i = 0; i < ZLFS_NDADDR; i++)
+		le->zi_db[i] = htole64(h->zi_db[i]);
+	for (i = 0; i < 3; i++)
+		le->zi_ib[i] = htole64(h->zi_ib[i]);
+}
+
 /*
  * Bootstrap check on a buffer that may hold only one device sector:
  * returns the filesystem block size if the buffer starts with a
@@ -144,8 +173,9 @@ zlfs_sb_block_valid(const void *block, u_int32_t bsize)
  * stale copies linger in the buffer cache.
  */
 static int
-zlfs_sb_try(struct zlfs_mount *zmp, u_int64_t lba, u_int32_t bsize,
-    struct zlfs_super *best, u_int64_t *best_gen, int *best_valid)
+zlfs_sb_try(struct zlfs_mount *zmp, u_int64_t lba, u_int32_t bsize, int z,
+    struct zlfs_super *best, u_int64_t *best_gen, int *best_valid,
+    int *best_zidx)
 {
 	struct buf *bp;
 	u_int64_t gen;
@@ -168,6 +198,7 @@ zlfs_sb_try(struct zlfs_mount *zmp, u_int64_t lba, u_int32_t bsize,
 			memcpy(best, bp->b_data, sizeof(*best));
 			*best_gen = gen;
 			*best_valid = 1;
+			*best_zidx = z;
 		}
 	}
 
@@ -189,7 +220,7 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
 	struct zlfs_super best;
 	u_int64_t best_gen = 0, bs_lbas, cand, k, nscan, start, wp;
 	u_int32_t bsize = 0, secsize = zmp->zm_secsize;
-	int best_valid = 0, error, z;
+	int best_valid = 0, best_zidx = 0, error, z;
 
 	/* Bootstrap the block size from a zone-start entry. */
 	for (z = 0; z < ZLFS_SB_ZONES && bsize == 0; z++) {
@@ -213,8 +244,8 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
 		start = sbz[z].dz_start_lba;
 		wp = sbz[z].dz_write_pointer_lba;
 
-		error = zlfs_sb_try(zmp, start, bsize, &best, &best_gen,
-		    &best_valid);
+		error = zlfs_sb_try(zmp, start, bsize, z, &best, &best_gen,
+		    &best_valid, &best_zidx);
 		if (error != 0)
 			return error;
 
@@ -231,8 +262,8 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
 				cand = wp - k * bs_lbas;
 				if (cand <= start)
 					break;
-				error = zlfs_sb_try(zmp, cand, bsize, &best,
-				    &best_gen, &best_valid);
+				error = zlfs_sb_try(zmp, cand, bsize, z, &best,
+				    &best_gen, &best_valid, &best_zidx);
 				if (error != 0)
 					return error;
 			}
@@ -245,8 +276,8 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
 				cand = start + k * bs_lbas;
 				if (cand >= start + sbz[z].dz_capacity_lba)
 					break;
-				error = zlfs_sb_try(zmp, cand, bsize, &best,
-				    &best_gen, &best_valid);
+				error = zlfs_sb_try(zmp, cand, bsize, z, &best,
+				    &best_gen, &best_valid, &best_zidx);
 				if (error != 0)
 					return error;
 			}
@@ -258,6 +289,7 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
 
 	zlfs_sb_letoh(&zmp->zm_super, &best);
 	zmp->zm_bshift = ffs(bsize) - 1;
+	zmp->zm_sb_zidx = best_zidx;
 	return 0;
 }
 
@@ -348,8 +380,13 @@ zlfs_ckpt_load(struct zlfs_mount *zmp)
 	if (error != 0)
 		return error;
 
-	zmp->zm_imap = mallocarray(ninodes, sizeof(u_int64_t), M_ZLFS,
-	    M_WAITOK);
+	/*
+	 * The inode map is always allocated to the full one-block
+	 * capacity so a read-write mount can grow it in place when new
+	 * inodes are created; zm_ninodes tracks how many are valid.
+	 */
+	zmp->zm_imap = mallocarray(maxino, sizeof(u_int64_t), M_ZLFS,
+	    M_WAITOK | M_ZERO);
 	for (i = 0; i < ninodes; i++)
 		zmp->zm_imap[i] =
 		    letoh64(((u_int64_t *)bp->b_data)[i]);

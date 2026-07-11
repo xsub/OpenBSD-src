@@ -36,6 +36,7 @@ struct zlfs_mount {
 	struct mount	*zm_mountp;
 	struct vnode	*zm_devvp;
 	struct rwlock	 zm_lock;	/* guards zm_nodes and vnode creation */
+	struct rwlock	 zm_wlock;	/* serialises the write/commit path */
 	struct zlfs_node_list zm_nodes;	/* active in-core inodes */
 	dev_t		 zm_dev;
 	struct zlfs_super zm_super;	/* host-endian superblock copy */
@@ -46,6 +47,20 @@ struct zlfs_mount {
 	struct zlfs_zone_state *zm_zones;
 	u_int64_t	*zm_imap;	/* inode -> device LBA, or NULL */
 	u_int64_t	 zm_ninodes;	/* number of zm_imap entries */
+	int		 zm_rdonly;	/* mounted read-only */
+
+	/* Data-log head (append point for new data/metadata blocks). */
+	u_int64_t	 zm_log_lba;	/* next free device LBA */
+	u_int64_t	 zm_log_zend;	/* end LBA of the current log zone */
+	u_int64_t	 zm_log_zidx;	/* current data zone index */
+	u_int64_t	 zm_next_ino;	/* next inode number to allocate */
+
+	/* Superblock-log head (generation ping-pong across zones 0-1). */
+	u_int64_t	 zm_sb_lba;	/* next free LBA in the active SB zone */
+	u_int64_t	 zm_sb_zstart[ZLFS_SB_ZONES]; /* SB zone start LBAs */
+	u_int64_t	 zm_sb_zcap;	/* usable LBAs per SB zone */
+	int		 zm_sb_zidx;	/* active SB zone (0 or 1) */
+
 	struct netexport zm_export;
 };
 
@@ -56,8 +71,15 @@ struct zlfs_node {
 	struct zlfs_mount *zn_zmp;
 	u_int64_t	 zn_ino;
 	int		 zn_onlist;	/* linked into zm_nodes? */
+	int		 zn_dirty;	/* needs commit */
+	u_int8_t	*zn_data;	/* in-core file/dir contents, or NULL */
+	size_t		 zn_datalen;	/* valid bytes in zn_data */
 	struct zlfs_inode zn_dinode;	/* host-endian inode copy */
 };
+
+/* Largest file the direct-block-only write path supports. */
+#define ZLFS_MAXFILESZ(zmp) \
+	(ZLFS_NDADDR * (u_int64_t)(zmp)->zm_super.zs_block_size)
 
 #define VFSTOZLFS(mp)	((struct zlfs_mount *)((mp)->mnt_data))
 #define VTOZ(vp)	((struct zlfs_node *)(vp)->v_data)
@@ -67,12 +89,16 @@ struct zlfs_node {
 
 extern const struct vops zlfs_vops;
 
+/* zlfs_vfsops.c */
+int		zlfs_ialloc(struct zlfs_mount *, u_int32_t, struct vnode **);
+
 /* zlfs_subr.c */
 void		zlfs_crc32c_init(void);
 u_int32_t	zlfs_crc32c_update(u_int32_t, const void *, size_t);
 #define ZLFS_CRC32C_INITIAL	0xffffffffU
 #define ZLFS_CRC32C_FINAL(c)	((c) ^ 0xffffffffU)
 void		zlfs_sb_letoh(struct zlfs_super *, const struct zlfs_super *);
+void		zlfs_inode_htole(struct zlfs_inode *, const struct zlfs_inode *);
 int		zlfs_sb_discover(struct zlfs_mount *, const struct dk_zone *,
 		    struct proc *);
 int		zlfs_ckpt_load(struct zlfs_mount *);
@@ -84,6 +110,14 @@ int		zlfs_bread_block(struct zlfs_mount *, u_int64_t, struct buf **);
 int		zlfs_zones_load(struct zlfs_mount *);
 void		zlfs_zones_free(struct zlfs_mount *);
 u_int64_t	zlfs_zones_empty(struct zlfs_mount *);
+int		zlfs_log_init(struct zlfs_mount *, const struct dk_zone *);
+int		zlfs_alloc_block(struct zlfs_mount *, u_int64_t *);
+
+/* zlfs_write.c */
+int		zlfs_write_block(struct zlfs_mount *, u_int64_t, const void *);
+int		zlfs_node_load(struct zlfs_node *);
+void		zlfs_node_dirty(struct zlfs_node *);
+int		zlfs_commit(struct zlfs_mount *);
 
 #endif /* _KERNEL */
 #endif /* _ZLFS_ZLFS_VAR_H_ */

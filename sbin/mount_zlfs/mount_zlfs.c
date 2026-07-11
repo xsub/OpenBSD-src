@@ -68,9 +68,9 @@ main(int argc, char *argv[])
 	args.fspec = dev;
 	args.export_info.ex_root = DEFAULT_ROOTUID;
 
-	/* ZLFS is read-only for now. */
-	mntflags |= MNT_RDONLY;
-	args.export_info.ex_flags = MNT_EXRDONLY;
+	/* Read-write by default; -o ro selects a read-only mount. */
+	if (mntflags & MNT_RDONLY)
+		args.export_info.ex_flags = MNT_EXRDONLY;
 
 	if (mount(MOUNT_ZLFS, dir, mntflags, &args) == -1)
 		err(1, "mount %s on %s", dev, dir);

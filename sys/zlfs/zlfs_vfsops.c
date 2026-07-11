@@ -56,9 +56,6 @@ zlfs_mount(struct mount *mp, const char *path, void *data,
 	char fspec[MNAMELEN];
 	int error;
 
-	if ((mp->mnt_flag & MNT_RDONLY) == 0)
-		return EROFS;
-
 	if (mp->mnt_flag & MNT_UPDATE) {
 		zmp = VFSTOZLFS(mp);
 		if (args && args->fspec == NULL)
@@ -150,10 +147,12 @@ zlfs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p,
 
 	zmp = malloc(sizeof(*zmp), M_ZLFS, M_WAITOK | M_ZERO);
 	rw_init(&zmp->zm_lock, "zlfs");
+	rw_init(&zmp->zm_wlock, "zlfswr");
 	LIST_INIT(&zmp->zm_nodes);
 	zmp->zm_devvp = devvp;
 	zmp->zm_dev = dev;
 	zmp->zm_secsize = dl.d_secsize;
+	zmp->zm_rdonly = (mp->mnt_flag & MNT_RDONLY) != 0;
 
 	/*
 	 * The superblock zones are the first two zones on the device;
@@ -204,6 +203,11 @@ zlfs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p,
 			goto out;
 	}
 
+	/* Initialise the write-log heads (needed for a read-write mount). */
+	error = zlfs_log_init(zmp, sbz);
+	if (error != 0)
+		goto out;
+
 	zmp->zm_mountp = mp;
 	zmp->zm_ctime = gettime();
 
@@ -228,7 +232,7 @@ out:
 	if (zmp != NULL) {
 		if (zmp->zm_imap != NULL)
 			free(zmp->zm_imap, M_ZLFS,
-			    zmp->zm_ninodes * sizeof(u_int64_t));
+			    zmp->zm_super.zs_block_size);
 		zlfs_zones_free(zmp);
 		free(zmp, M_ZLFS, sizeof(*zmp));
 		mp->mnt_data = NULL;
@@ -245,11 +249,18 @@ zlfs_start(struct mount *mp, int flags, struct proc *p)
 int
 zlfs_unmount(struct mount *mp, int mntflags, struct proc *p)
 {
-	struct zlfs_mount *zmp;
+	struct zlfs_mount *zmp = VFSTOZLFS(mp);
 	int error, flags = 0;
 
 	if (mntflags & MNT_FORCE)
 		flags |= FORCECLOSE;
+
+	/* Flush any buffered changes before tearing the mount down. */
+	if (!zmp->zm_rdonly) {
+		error = zlfs_commit(zmp);
+		if (error != 0 && (mntflags & MNT_FORCE) == 0)
+			return error;
+	}
 
 	if ((error = vflush(mp, NULL, flags)) != 0)
 		return error;
@@ -262,8 +273,7 @@ zlfs_unmount(struct mount *mp, int mntflags, struct proc *p)
 	vput(zmp->zm_devvp);
 
 	if (zmp->zm_imap != NULL)
-		free(zmp->zm_imap, M_ZLFS,
-		    zmp->zm_ninodes * sizeof(u_int64_t));
+		free(zmp->zm_imap, M_ZLFS, zmp->zm_super.zs_block_size);
 	zlfs_zones_free(zmp);
 	free(zmp, M_ZLFS, sizeof(*zmp));
 	mp->mnt_data = NULL;
@@ -311,7 +321,11 @@ int
 zlfs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred,
     struct proc *p)
 {
-	return 0;
+	struct zlfs_mount *zmp = VFSTOZLFS(mp);
+
+	if (zmp->zm_rdonly)
+		return 0;
+	return zlfs_commit(zmp);
 }
 
 /*
@@ -348,17 +362,6 @@ zlfs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 
 	*vpp = NULL;
 
-	/* Fetch the on-disk inode (or synthesise the root). */
-	if (zmp->zm_imap != NULL) {
-		error = zlfs_read_dinode(zmp, ino, &dinode);
-		if (error != 0)
-			return error;
-	} else {
-		if (ino != ZLFS_ROOT_INO)
-			return ENOENT;
-		zlfs_synth_root(zmp, &dinode);
-	}
-
 loop:
 	rw_enter_write(&zmp->zm_lock);
 	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
@@ -376,7 +379,22 @@ loop:
 	}
 	rw_exit_write(&zmp->zm_lock);
 
-	/* Not cached: create a fresh vnode without holding zm_lock. */
+	/*
+	 * Cache miss: fetch the on-disk inode (or synthesise the root)
+	 * only now, so a newly created inode -- present in the cache but
+	 * not yet on disk -- is found above without a spurious read.
+	 */
+	if (zmp->zm_imap != NULL) {
+		error = zlfs_read_dinode(zmp, ino, &dinode);
+		if (error != 0)
+			return error;
+	} else {
+		if (ino != ZLFS_ROOT_INO)
+			return ENOENT;
+		zlfs_synth_root(zmp, &dinode);
+	}
+
+	/* Create a fresh vnode without holding zm_lock. */
 	error = getnewvnode(VT_ZLFS, mp, &zlfs_vops, &vp);
 	if (error != 0)
 		return error;
@@ -405,6 +423,65 @@ loop:
 	}
 	if (ino == ZLFS_ROOT_INO)
 		vp->v_flag |= VROOT;
+	LIST_INSERT_HEAD(&zmp->zm_nodes, znp, zn_entry);
+	znp->zn_onlist = 1;
+	rw_exit_write(&zmp->zm_lock);
+
+	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
+	*vpp = vp;
+	return 0;
+}
+
+/*
+ * Allocate a brand-new inode and return its locked vnode.  The inode
+ * exists only in core (dirty, empty data, no on-disk map entry) until
+ * the next commit.  Serialised by the parent directory lock held by the
+ * caller.
+ */
+int
+zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
+{
+	struct zlfs_node *znp;
+	struct vnode *vp;
+	u_int64_t ino, maxino;
+	int error;
+
+	*vpp = NULL;
+	if (zmp->zm_rdonly)
+		return EROFS;
+	maxino = zmp->zm_super.zs_block_size / sizeof(u_int64_t);
+	if (zmp->zm_next_ino >= maxino)
+		return ENOSPC;
+	ino = zmp->zm_next_ino;
+
+	error = getnewvnode(VT_ZLFS, zmp->zm_mountp, &zlfs_vops, &vp);
+	if (error != 0)
+		return error;
+
+	znp = malloc(sizeof(*znp), M_ZLFS, M_WAITOK | M_ZERO);
+	rrw_init_flags(&znp->zn_lock, "zlfsinode", RWL_DUPOK | RWL_IS_VNODE);
+	vp->v_data = znp;
+	znp->zn_vnode = vp;
+	znp->zn_zmp = zmp;
+	znp->zn_ino = ino;
+	znp->zn_dinode.zi_ino = ino;
+	znp->zn_dinode.zi_gen = 1;
+	znp->zn_dinode.zi_mode = mode;
+	znp->zn_dinode.zi_nlink = 1;
+	znp->zn_dinode.zi_atime = znp->zn_dinode.zi_mtime =
+	    znp->zn_dinode.zi_ctime = znp->zn_dinode.zi_btime = gettime();
+	vp->v_type = IFTOVT(mode);
+
+	/* Empty in-core contents; the on-disk map slot fills at commit. */
+	znp->zn_data = malloc(ZLFS_MAXFILESZ(zmp), M_ZLFS, M_WAITOK | M_ZERO);
+	znp->zn_datalen = 0;
+	zlfs_node_dirty(znp);
+
+	rw_enter_write(&zmp->zm_lock);
+	zmp->zm_next_ino = ino + 1;
+	if (ino + 1 > zmp->zm_ninodes)
+		zmp->zm_ninodes = ino + 1;
+	zmp->zm_imap[ino] = 0;
 	LIST_INSERT_HEAD(&zmp->zm_nodes, znp, zn_entry);
 	znp->zn_onlist = 1;
 	rw_exit_write(&zmp->zm_lock);
