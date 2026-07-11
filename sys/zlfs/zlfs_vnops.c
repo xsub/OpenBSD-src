@@ -128,6 +128,11 @@ zlfs_lookup(void *v)
 		    (cnp->cn_flags & ISLASTCN)) {
 			if (VTOZ(dvp)->zn_zmp->zm_rdonly)
 				return EROFS;
+			/*
+			 * Keep the pathname buffer for VOP_CREATE; without
+			 * SAVENAME namei frees it and the VOP double-frees.
+			 */
+			cnp->cn_flags |= SAVENAME;
 			return EJUSTRETURN;
 		}
 		return ENOENT;
