@@ -102,6 +102,7 @@ zlfs_lookup(void *v)
 	int error;
 
 	*ap->a_vpp = NULL;
+	cnp->cn_flags &= ~PDIRUNLOCK;
 	if (dvp->v_type != VDIR)
 		return ENOTDIR;
 
@@ -140,7 +141,23 @@ zlfs_lookup(void *v)
 	    (cnp->cn_flags & ISLASTCN))
 		return EROFS;
 
-	return VFS_VGET(zmp->zm_mountp, ino, ap->a_vpp);
+	error = VFS_VGET(zmp->zm_mountp, ino, ap->a_vpp);
+	if (error != 0)
+		return error;
+
+	/*
+	 * Descending into a child: release the parent directory lock
+	 * unless the caller asked to keep it (LOCKPARENT on the last
+	 * component).  Every in-tree filesystem does this; omitting it
+	 * leaks the parent's recursive vnode lock and wedges the next
+	 * access to the cached directory.
+	 */
+	if (!(cnp->cn_flags & LOCKPARENT) || !(cnp->cn_flags & ISLASTCN)) {
+		VOP_UNLOCK(dvp);
+		cnp->cn_flags |= PDIRUNLOCK;
+	}
+
+	return 0;
 }
 
 int
