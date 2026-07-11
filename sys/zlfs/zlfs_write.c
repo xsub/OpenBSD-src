@@ -119,6 +119,15 @@ zlfs_commit_node(struct zlfs_mount *zmp, struct zlfs_node *znp)
 	if (znp->zn_ino >= maxino)
 		return EFBIG;
 
+	/*
+	 * A removed inode (nlink 0) is dropped from the map and not
+	 * written; its blocks become garbage for a later cleaner.
+	 */
+	if (znp->zn_dinode.zi_nlink == 0) {
+		zmp->zm_imap[znp->zn_ino] = 0;
+		return 0;
+	}
+
 	if (znp->zn_data != NULL) {
 		if (znp->zn_datalen > ZLFS_MAXFILESZ(zmp))
 			return EFBIG;
@@ -294,7 +303,14 @@ zlfs_commit(struct zlfs_mount *zmp)
 	if (error != 0)
 		goto out_blk;
 
-	/* 4. New superblock (generation N+1) -- the commit point. */
+	/*
+	 * 4. Flush the segment (data, inodes, map, checkpoint) to stable
+	 * storage, then append the generation N+1 superblock as the
+	 * durable commit point.
+	 */
+	error = dk_zone_flush_kern(zmp->zm_dev);
+	if (error != 0)
+		goto out_blk;
 	error = zlfs_commit_super(zmp, blk, newgen, ckpt_lba);
 	if (error != 0)
 		goto out_blk;

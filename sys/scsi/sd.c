@@ -1877,6 +1877,33 @@ dk_zone_write_kern(dev_t dev, u_int64_t lba, void *buf, size_t len)
 	return error;
 }
 
+/*
+ * Flush the device write cache to stable storage.  Used by in-kernel
+ * consumers to order a durable commit point (e.g. a filesystem
+ * superblock) after its dependent blocks.
+ */
+int
+dk_zone_flush_kern(dev_t dev)
+{
+	struct sd_softc		*sc;
+	int			 error;
+
+	if (major(dev) >= nblkdev || bdevsw[major(dev)].d_open != sdopen)
+		return ENXIO;
+	sc = sdlookup(DISKUNIT(dev));
+	if (sc == NULL)
+		return ENXIO;
+	if (ISSET(sc->flags, SDF_DYING)) {
+		device_unref(&sc->sc_dev);
+		return ENXIO;
+	}
+
+	error = sd_flush(sc, 0);
+
+	device_unref(&sc->sc_dev);
+	return error;
+}
+
 int
 sd_ioctl_zonecmd(struct sd_softc *sc, struct dk_zone_op *dzo, int flags)
 {

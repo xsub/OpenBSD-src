@@ -30,6 +30,9 @@
 
 int	zlfs_lookup(void *);
 int	zlfs_create(void *);
+int	zlfs_mkdir(void *);
+int	zlfs_rmdir(void *);
+int	zlfs_remove(void *);
 int	zlfs_access(void *);
 int	zlfs_getattr(void *);
 int	zlfs_setattr(void *);
@@ -83,6 +86,102 @@ zlfs_dir_lookup(struct vnode *dvp, const char *name, int namlen,
 	return ENOENT;
 }
 
+/*
+ * Add a directory entry, reusing a freed slot if one exists so
+ * directories do not grow without bound.
+ */
+static int
+zlfs_dir_add(struct zlfs_node *dnp, const char *name, int namlen,
+    u_int64_t ino, u_int8_t type)
+{
+	struct zlfs_mount *zmp = dnp->zn_zmp;
+	struct zlfs_dirent zd;
+	u_int64_t off, slot = (u_int64_t)-1;
+	int error;
+
+	error = zlfs_node_load(dnp);
+	if (error != 0)
+		return error;
+
+	for (off = 0; off + ZLFS_DIRENT_SIZE <= dnp->zn_datalen;
+	    off += ZLFS_DIRENT_SIZE) {
+		if (((struct zlfs_dirent *)(dnp->zn_data + off))->zd_ino == 0) {
+			slot = off;
+			break;
+		}
+	}
+	if (slot == (u_int64_t)-1) {
+		if (dnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXFILESZ(zmp))
+			return ENOSPC;
+		slot = dnp->zn_datalen;
+		dnp->zn_datalen += ZLFS_DIRENT_SIZE;
+		dnp->zn_dinode.zi_size = dnp->zn_datalen;
+	}
+
+	memset(&zd, 0, sizeof(zd));
+	zd.zd_ino = htole64(ino);
+	zd.zd_type = type;
+	zd.zd_namlen = namlen;
+	memcpy(zd.zd_name, name, namlen);
+	memcpy(dnp->zn_data + slot, &zd, sizeof(zd));
+	dnp->zn_dinode.zi_mtime = gettime();
+	zlfs_node_dirty(dnp);
+	return 0;
+}
+
+/*
+ * Remove the directory entry that points at inode ino (matched by
+ * inode number, so the caller needs no pathname buffer).
+ */
+static int
+zlfs_dir_remove(struct zlfs_node *dnp, u_int64_t ino)
+{
+	struct zlfs_dirent *zd;
+	u_int64_t off;
+	int error;
+
+	error = zlfs_node_load(dnp);
+	if (error != 0)
+		return error;
+
+	for (off = 0; off + ZLFS_DIRENT_SIZE <= dnp->zn_datalen;
+	    off += ZLFS_DIRENT_SIZE) {
+		zd = (struct zlfs_dirent *)(dnp->zn_data + off);
+		if (zd->zd_ino != 0 && letoh64(zd->zd_ino) == ino) {
+			zd->zd_ino = 0;
+			dnp->zn_dinode.zi_mtime = gettime();
+			zlfs_node_dirty(dnp);
+			return 0;
+		}
+	}
+	return ENOENT;
+}
+
+/* Return 1 if the directory holds nothing but "." and "..". */
+static int
+zlfs_dir_empty(struct zlfs_node *dnp)
+{
+	struct zlfs_dirent *zd;
+	u_int64_t off;
+
+	if (zlfs_node_load(dnp) != 0)
+		return 0;
+
+	for (off = 0; off + ZLFS_DIRENT_SIZE <= dnp->zn_datalen;
+	    off += ZLFS_DIRENT_SIZE) {
+		zd = (struct zlfs_dirent *)(dnp->zn_data + off);
+		if (zd->zd_ino == 0)
+			continue;
+		if (zd->zd_namlen == 1 && zd->zd_name[0] == '.')
+			continue;
+		if (zd->zd_namlen == 2 && zd->zd_name[0] == '.' &&
+		    zd->zd_name[1] == '.')
+			continue;
+		return 0;
+	}
+	return 1;
+}
+
 int
 zlfs_lookup(void *v)
 {
@@ -110,11 +209,32 @@ zlfs_lookup(void *v)
 	}
 	if (cnp->cn_flags & ISDOTDOT) {
 		/*
-		 * The only directory is the root, whose parent is itself;
-		 * the VFS layer intercepts ".." at the mount root anyway.
+		 * Resolve ".." to the parent named by the directory's own
+		 * ".." entry.  Follow the ufs lock dance: drop the child
+		 * lock to fetch the parent (parent-before-child ordering),
+		 * then relock if the caller wants the parent locked.  (The
+		 * VFS layer intercepts ".." at the mount root before us.)
 		 */
-		vref(dvp);
-		*ap->a_vpp = dvp;
+		error = zlfs_dir_lookup(dvp, "..", 2, &ino);
+		if (error != 0)
+			return error;
+		VOP_UNLOCK(dvp);
+		cnp->cn_flags |= PDIRUNLOCK;
+		error = VFS_VGET(zmp->zm_mountp, ino, ap->a_vpp);
+		if (error != 0) {
+			if (vn_lock(dvp, LK_EXCLUSIVE | LK_RETRY) == 0)
+				cnp->cn_flags &= ~PDIRUNLOCK;
+			return error;
+		}
+		if ((cnp->cn_flags & LOCKPARENT) && (cnp->cn_flags & ISLASTCN)) {
+			error = vn_lock(dvp, LK_EXCLUSIVE);
+			if (error != 0) {
+				vput(*ap->a_vpp);
+				*ap->a_vpp = NULL;
+				return error;
+			}
+			cnp->cn_flags &= ~PDIRUNLOCK;
+		}
 		return 0;
 	}
 
@@ -140,9 +260,8 @@ zlfs_lookup(void *v)
 	if (error != 0)
 		return error;
 
-	/* Delete/rename of an existing name is not supported yet. */
-	if ((cnp->cn_nameiop == DELETE || cnp->cn_nameiop == RENAME) &&
-	    (cnp->cn_flags & ISLASTCN))
+	/* Rename of an existing name is not supported yet. */
+	if (cnp->cn_nameiop == RENAME && (cnp->cn_flags & ISLASTCN))
 		return EROFS;
 
 	error = VFS_VGET(zmp->zm_mountp, ino, ap->a_vpp);
@@ -382,7 +501,6 @@ zlfs_create(void *v)
 	struct vattr *vap = ap->a_vap;
 	struct zlfs_node *dnp = VTOZ(dvp);
 	struct zlfs_mount *zmp = dnp->zn_zmp;
-	struct zlfs_dirent zd;
 	struct vnode *vp;
 	u_int64_t ino;
 	int error;
@@ -408,27 +526,12 @@ zlfs_create(void *v)
 	if (error != 0)
 		goto bad;
 
-	/* Append the directory entry to the (in-core) parent. */
-	error = zlfs_node_load(dnp);
+	error = zlfs_dir_add(dnp, cnp->cn_nameptr, cnp->cn_namelen,
+	    VTOZ(vp)->zn_ino, DT_REG);
 	if (error != 0) {
 		zlfs_idrop(vp);
 		goto bad;
 	}
-	if (dnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXFILESZ(zmp)) {
-		zlfs_idrop(vp);
-		error = ENOSPC;
-		goto bad;
-	}
-	memset(&zd, 0, sizeof(zd));
-	zd.zd_ino = htole64(VTOZ(vp)->zn_ino);
-	zd.zd_type = DT_REG;
-	zd.zd_namlen = cnp->cn_namelen;
-	memcpy(zd.zd_name, cnp->cn_nameptr, cnp->cn_namelen);
-	memcpy(dnp->zn_data + dnp->zn_datalen, &zd, sizeof(zd));
-	dnp->zn_datalen += ZLFS_DIRENT_SIZE;
-	dnp->zn_dinode.zi_size = dnp->zn_datalen;
-	dnp->zn_dinode.zi_mtime = gettime();
-	zlfs_node_dirty(dnp);
 
 	if ((cnp->cn_flags & SAVESTART) == 0)
 		pool_put(&namei_pool, cnp->cn_pnbuf);
@@ -438,6 +541,160 @@ zlfs_create(void *v)
 bad:
 	pool_put(&namei_pool, cnp->cn_pnbuf);
 	*ap->a_vpp = NULL;
+	return error;
+}
+
+int
+zlfs_mkdir(void *v)
+{
+	struct vop_mkdir_args *ap = v;
+	struct vnode *dvp = ap->a_dvp;
+	struct componentname *cnp = ap->a_cnp;
+	struct vattr *vap = ap->a_vap;
+	struct zlfs_node *dnp = VTOZ(dvp);
+	struct zlfs_mount *zmp = dnp->zn_zmp;
+	struct zlfs_node *np;
+	struct zlfs_dirent zd;
+	struct vnode *vp;
+	u_int64_t ino;
+	int error;
+
+	if (zmp->zm_rdonly) {
+		error = EROFS;
+		goto bad;
+	}
+	if (cnp->cn_namelen > ZLFS_MAXNAMLEN) {
+		error = ENAMETOOLONG;
+		goto bad;
+	}
+	if (zlfs_dir_lookup(dvp, cnp->cn_nameptr, cnp->cn_namelen, &ino) == 0) {
+		error = EEXIST;
+		goto bad;
+	}
+
+	error = zlfs_ialloc(zmp, S_IFDIR | (vap->va_mode & 07777), &vp);
+	if (error != 0)
+		goto bad;
+	np = VTOZ(vp);
+	np->zn_dinode.zi_nlink = 2;	/* "." and the parent's entry */
+
+	/* Lay down the new directory's "." and ".." entries. */
+	memset(&zd, 0, sizeof(zd));
+	zd.zd_ino = htole64(np->zn_ino);
+	zd.zd_type = DT_DIR;
+	zd.zd_namlen = 1;
+	zd.zd_name[0] = '.';
+	memcpy(np->zn_data + 0 * ZLFS_DIRENT_SIZE, &zd, sizeof(zd));
+	memset(&zd, 0, sizeof(zd));
+	zd.zd_ino = htole64(dnp->zn_ino);
+	zd.zd_type = DT_DIR;
+	zd.zd_namlen = 2;
+	zd.zd_name[0] = '.';
+	zd.zd_name[1] = '.';
+	memcpy(np->zn_data + 1 * ZLFS_DIRENT_SIZE, &zd, sizeof(zd));
+	np->zn_datalen = 2 * ZLFS_DIRENT_SIZE;
+	np->zn_dinode.zi_size = np->zn_datalen;
+	zlfs_node_dirty(np);
+
+	error = zlfs_dir_add(dnp, cnp->cn_nameptr, cnp->cn_namelen,
+	    np->zn_ino, DT_DIR);
+	if (error != 0) {
+		zlfs_idrop(vp);
+		goto bad;
+	}
+	dnp->zn_dinode.zi_nlink++;	/* the child's ".." links back */
+	zlfs_node_dirty(dnp);
+
+	if ((cnp->cn_flags & SAVESTART) == 0)
+		pool_put(&namei_pool, cnp->cn_pnbuf);
+	/*
+	 * Unlike VOP_CREATE, the VOP_MKDIR callers do not release the
+	 * parent directory, so this VOP owns the vput(dvp) on every path.
+	 */
+	vput(dvp);
+	*ap->a_vpp = vp;
+	return 0;
+
+bad:
+	pool_put(&namei_pool, cnp->cn_pnbuf);
+	vput(dvp);
+	*ap->a_vpp = NULL;
+	return error;
+}
+
+/*
+ * Remove a file.  The VOP_REMOVE wrapper releases dvp and vp, and
+ * namei owns the pathname buffer, so this only edits the directory and
+ * the inode.
+ */
+int
+zlfs_remove(void *v)
+{
+	struct vop_remove_args *ap = v;
+	struct zlfs_node *dnp = VTOZ(ap->a_dvp);
+	struct zlfs_node *np = VTOZ(ap->a_vp);
+	struct zlfs_mount *zmp = dnp->zn_zmp;
+	int error;
+
+	if (zmp->zm_rdonly)
+		return EROFS;
+	if (ap->a_vp->v_type == VDIR)
+		return EPERM;
+
+	error = zlfs_dir_remove(dnp, np->zn_ino);
+	if (error != 0)
+		return error;
+
+	if (np->zn_dinode.zi_nlink > 0)
+		np->zn_dinode.zi_nlink--;
+	if (np->zn_dinode.zi_nlink == 0)
+		zmp->zm_imap[np->zn_ino] = 0;
+	zlfs_node_dirty(np);
+	return 0;
+}
+
+/*
+ * Remove an empty directory.  Unlike VOP_REMOVE, the VOP_RMDIR wrapper
+ * does not release dvp/vp, so this must vput them itself.
+ */
+int
+zlfs_rmdir(void *v)
+{
+	struct vop_rmdir_args *ap = v;
+	struct vnode *dvp = ap->a_dvp;
+	struct vnode *vp = ap->a_vp;
+	struct zlfs_node *dnp = VTOZ(dvp);
+	struct zlfs_node *np = VTOZ(vp);
+	struct zlfs_mount *zmp = dnp->zn_zmp;
+	int error;
+
+	if (zmp->zm_rdonly) {
+		error = EROFS;
+		goto out;
+	}
+	if (vp->v_type != VDIR) {
+		error = ENOTDIR;
+		goto out;
+	}
+	if (!zlfs_dir_empty(np)) {
+		error = ENOTEMPTY;
+		goto out;
+	}
+
+	error = zlfs_dir_remove(dnp, np->zn_ino);
+	if (error != 0)
+		goto out;
+	if (dnp->zn_dinode.zi_nlink > 0)
+		dnp->zn_dinode.zi_nlink--;	/* drop the child's ".." link */
+	zlfs_node_dirty(dnp);
+	np->zn_dinode.zi_nlink = 0;
+	np->zn_datalen = 0;
+	zmp->zm_imap[np->zn_ino] = 0;
+	zlfs_node_dirty(np);
+
+out:
+	vput(vp);
+	vput(dvp);
 	return error;
 }
 
@@ -631,11 +888,11 @@ const struct vops zlfs_vops = {
 	.vop_kqfilter	= eopnotsupp,
 	.vop_revoke	= vop_generic_revoke,
 	.vop_fsync	= zlfs_fsync,
-	.vop_remove	= eopnotsupp,
+	.vop_remove	= zlfs_remove,
 	.vop_link	= eopnotsupp,
 	.vop_rename	= eopnotsupp,
-	.vop_mkdir	= eopnotsupp,
-	.vop_rmdir	= eopnotsupp,
+	.vop_mkdir	= zlfs_mkdir,
+	.vop_rmdir	= zlfs_rmdir,
 	.vop_symlink	= eopnotsupp,
 	.vop_readdir	= zlfs_readdir,
 	.vop_readlink	= eopnotsupp,
