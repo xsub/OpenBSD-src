@@ -147,6 +147,16 @@ struct dk_zone_report {
  */
 int	dk_zone_report_kern(dev_t, u_int64_t, struct dk_zone *, u_int32_t,
 	    u_int32_t *);
+
+/*
+ * In-kernel raw zoned write for filesystem consumers.  Writes len
+ * bytes (a multiple of the sector size) from buf to absolute device
+ * LBA lba with a single WRITE command, bypassing the buffer cache and
+ * the host-managed write gate.  For sequential-write zones the caller
+ * must target the zone's current write pointer.  buf must be
+ * DMA-capable (e.g. dma_alloc'd).  The device must be an sd(4) disk.
+ */
+int	dk_zone_write_kern(dev_t, u_int64_t, void *, size_t);
 #endif /* _KERNEL */
 
 struct dk_zone_op {

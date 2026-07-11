@@ -1131,3 +1131,4 @@ file zlfs/zlfs_vfsops.c			zlfs
 file zlfs/zlfs_vnops.c			zlfs
 file zlfs/zlfs_alloc.c			zlfs
 file zlfs/zlfs_subr.c			zlfs
+file zlfs/zlfs_write.c			zlfs

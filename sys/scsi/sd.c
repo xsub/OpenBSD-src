@@ -107,6 +107,7 @@ int	sd_ioctl_zonereport(struct sd_softc *, struct dk_zone_report *);
 int	sd_ioctl_zonecmd(struct sd_softc *, struct dk_zone_op *, int);
 int	sd_zbc_report_zones_kern(struct sd_softc *, u_int64_t,
 	    struct dk_zone *, u_int32_t, u_int32_t *);
+int	sd_zone_write_kern(struct sd_softc *, u_int64_t, void *, size_t);
 int	sd_zbc_report_zones(struct sd_softc *, u_int64_t, u_int8_t, void *,
 	    u_int32_t, u_int32_t *, int);
 int	sd_zbc_zone_cmd(struct sd_softc *, u_int64_t, u_int8_t, int, int);
@@ -1801,6 +1802,76 @@ dk_zone_report_kern(dev_t dev, u_int64_t start_lba, struct dk_zone *zones,
 	else
 		error = sd_zbc_report_zones_kern(sc, start_lba, zones,
 		    nzones, filled);
+
+	device_unref(&sc->sc_dev);
+	return error;
+}
+
+/*
+ * Write len bytes from buf to device LBA lba with a single WRITE(16)
+ * command issued directly to the device, bypassing sdstrategy and the
+ * host-managed write gate.  For zoned devices the caller must target
+ * the current write pointer; the device enforces sequential ordering.
+ * buf must be suitable for DMA (e.g. dma_alloc'd).
+ */
+int
+sd_zone_write_kern(struct sd_softc *sc, u_int64_t lba, void *buf, size_t len)
+{
+	struct scsi_link	*link;
+	struct scsi_xfer	*xs;
+	struct disklabel	*lp = sc->sc_dk.dk_label;
+	u_int32_t		 secsize, nsecs;
+	int			 error;
+
+	if (ISSET(sc->flags, SDF_DYING))
+		return ENXIO;
+	if (lp == NULL || lp->d_secsize == 0)
+		return EIO;
+	secsize = lp->d_secsize;
+	if (len == 0 || len > MAXPHYS || (len % secsize) != 0)
+		return EINVAL;
+	nsecs = len / secsize;
+	if (lba > UINT64_MAX - nsecs)
+		return EINVAL;
+
+	link = sc->sc_link;
+	xs = scsi_xs_get(link, SCSI_DATA_OUT | SCSI_SILENT);
+	if (xs == NULL)
+		return ENOMEM;
+
+	xs->cmdlen = sd_cmd_rw16(&xs->cmd, 0, lba, nsecs);
+	xs->data = buf;
+	xs->datalen = len;
+	xs->retries = 2;
+	xs->timeout = 60000;
+
+	error = scsi_xs_sync(xs);
+	scsi_xs_put(xs);
+	return error;
+}
+
+/*
+ * Kernel entry point for a raw zoned write, used by in-kernel
+ * consumers (the ZLFS log).  Resolves the sd(4) device and issues a
+ * direct WRITE at an absolute device LBA.
+ */
+int
+dk_zone_write_kern(dev_t dev, u_int64_t lba, void *buf, size_t len)
+{
+	struct sd_softc		*sc;
+	int			 error;
+
+	if (major(dev) >= nblkdev || bdevsw[major(dev)].d_open != sdopen)
+		return ENXIO;
+	sc = sdlookup(DISKUNIT(dev));
+	if (sc == NULL)
+		return ENXIO;
+	if (ISSET(sc->flags, SDF_DYING)) {
+		device_unref(&sc->sc_dev);
+		return ENXIO;
+	}
+
+	error = sd_zone_write_kern(sc, lba, buf, len);
 
 	device_unref(&sc->sc_dev);
 	return error;
