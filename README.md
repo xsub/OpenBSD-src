@@ -378,11 +378,12 @@ Kernel (`sys/zlfs/`):
 - Write: a raw zoned-write primitive (`dk_zone_write_kern`, a direct
   `WRITE(16)` bypassing the buffer cache and the host-managed write gate),
   an append-only log allocator, and `create`/`write`/`fsync`/truncate,
-  `mkdir`/`rmdir`, and `unlink`.  Regular files grow past the twelve
-  direct blocks through a single indirect block, and the in-core file
-  buffer grows on demand rather than reserving the maximum up front.
-  Directories nest: `..` resolves to the real parent, and directory link
-  counts track subdirectories.  A commit flushes all dirty inodes as a
+  `mkdir`/`rmdir`, `unlink`, and `rename`.  Regular files grow past the
+  twelve direct blocks through a single indirect block, and the in-core
+  file buffer grows on demand rather than reserving the maximum up front.
+  Directories nest: `..` resolves to the real parent, directory link
+  counts track subdirectories, and `rename` reparents `..` (rejecting a
+  move of a directory into its own subtree).  A commit flushes all dirty inodes as a
   fresh log segment (data, indirect and inode blocks, a new inode map, a
   new checkpoint), issues a `SYNCHRONIZE CACHE`, and then appends a
   generation N+1 superblock, which is the atomic commit point: nothing
@@ -397,10 +398,6 @@ Current limitations (documented in the code; each is a natural next step):
 - Each open file or directory is buffered whole in core, so the maximum
   file size is also bounded by available memory; there is no block-level
   buffer-cache integration.
-- `rename` handles files and same-directory renames (including
-  overwriting an existing target); moving a *directory* to a different
-  parent is rejected (`EINVAL`), since reparenting `..` and the
-  subtree-cycle check are not yet implemented.
 - No garbage collector: orphaned and superseded blocks (including those
   freed by `unlink`/`rmdir`, `rename`, and truncation) are not reclaimed,
   and a filled superblock zone is not reset.
@@ -410,10 +407,8 @@ Remaining sequence toward a general-purpose filesystem:
 
 1. Double/triple indirect blocks and block-level buffer-cache integration
    (so files need not be buffered whole).
-2. Cross-directory directory `rename` (reparent `..`, subtree-cycle
-   check).
-3. A cleaner/garbage collector and superblock-zone reset.
-4. Concurrency-safe commit.
+2. A cleaner/garbage collector and superblock-zone reset.
+3. Concurrency-safe commit.
 
 ## Non-Goals For The Current Prototype
 
