@@ -472,8 +472,13 @@ zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 	    znp->zn_dinode.zi_ctime = znp->zn_dinode.zi_btime = gettime();
 	vp->v_type = IFTOVT(mode);
 
-	/* Empty in-core contents; the on-disk map slot fills at commit. */
-	znp->zn_data = malloc(ZLFS_MAXFILESZ(zmp), M_ZLFS, M_WAITOK | M_ZERO);
+	/*
+	 * Start with a one-block buffer; write/setattr/dir_add grow it on
+	 * demand up to the maximum file size.  The on-disk map slot fills
+	 * at the next commit.
+	 */
+	znp->zn_dataalloc = zmp->zm_super.zs_block_size;
+	znp->zn_data = malloc(znp->zn_dataalloc, M_ZLFS, M_WAITOK | M_ZERO);
 	znp->zn_datalen = 0;
 	zlfs_node_dirty(znp);
 

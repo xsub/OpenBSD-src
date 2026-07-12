@@ -47,9 +47,70 @@ zlfs_write_block(struct zlfs_mount *zmp, u_int64_t lba, const void *data)
 }
 
 /*
+ * Map a logical block number to its device LBA, following the single
+ * indirect block for blocks at or beyond ZLFS_NDADDR.  *ind caches the
+ * indirect block across calls (NULL on the first) so a sequential load
+ * reads it once; the caller frees it with brelse when done.
+ */
+int
+zlfs_bmap_read(struct zlfs_node *znp, u_int64_t blkno, struct buf **ind,
+    u_int64_t *lbap)
+{
+	struct zlfs_mount *zmp = znp->zn_zmp;
+	struct zlfs_inode *zi = &znp->zn_dinode;
+	u_int64_t nindir = ZLFS_NINDIR(zmp);
+	int error;
+
+	if (blkno < ZLFS_NDADDR) {
+		*lbap = zi->zi_db[blkno];
+		return 0;
+	}
+	blkno -= ZLFS_NDADDR;
+	if (blkno >= nindir)
+		return EFBIG;		/* beyond single indirect */
+	if (*ind == NULL) {
+		if (zi->zi_ib[0] == 0)
+			return EIO;
+		error = zlfs_bread_block(zmp, zi->zi_ib[0], ind);
+		if (error != 0)
+			return error;
+	}
+	*lbap = letoh64(((u_int64_t *)(*ind)->b_data)[blkno]);
+	return 0;
+}
+
+/*
+ * Grow znp->zn_data so it can hold at least need bytes, preserving the
+ * current contents and zeroing the new tail.  The allocation is rounded
+ * up to a block and never exceeds the maximum file size.
+ */
+int
+zlfs_node_resize(struct zlfs_node *znp, size_t need)
+{
+	struct zlfs_mount *zmp = znp->zn_zmp;
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	size_t newalloc;
+	u_int8_t *nbuf;
+
+	if (need <= znp->zn_dataalloc)
+		return 0;
+	if (need > ZLFS_MAXFILESZ(zmp))
+		return EFBIG;
+	newalloc = roundup(need, bsize);
+	nbuf = malloc(newalloc, M_ZLFS, M_WAITOK | M_ZERO);
+	if (znp->zn_data != NULL) {
+		memcpy(nbuf, znp->zn_data, znp->zn_datalen);
+		free(znp->zn_data, M_ZLFS, znp->zn_dataalloc);
+	}
+	znp->zn_data = nbuf;
+	znp->zn_dataalloc = newalloc;
+	return 0;
+}
+
+/*
  * Ensure znp->zn_data holds the inode's current contents so it can be
- * modified in core before the next commit.  The buffer is always sized
- * to the direct-block maximum.
+ * modified in core before the next commit.  The buffer is sized to the
+ * file's current length (rounded to a block), grown on demand later.
  */
 int
 zlfs_node_load(struct zlfs_node *znp)
@@ -57,27 +118,30 @@ zlfs_node_load(struct zlfs_node *znp)
 	struct zlfs_mount *zmp = znp->zn_zmp;
 	struct zlfs_inode *zi = &znp->zn_dinode;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
-	u_int64_t maxsz = ZLFS_MAXFILESZ(zmp);
-	struct buf *bp;
-	u_int64_t off, blkno;
+	struct buf *bp, *ind = NULL;
+	u_int64_t off, blkno, lba;
 	size_t n;
 	int error;
 
 	if (znp->zn_data != NULL)
 		return 0;
-	if (zi->zi_size > maxsz)
+	if (zi->zi_size > ZLFS_MAXFILESZ(zmp))
 		return EFBIG;
 
-	znp->zn_data = malloc(maxsz, M_ZLFS, M_WAITOK | M_ZERO);
+	znp->zn_dataalloc = roundup(MAX(zi->zi_size, bsize), bsize);
+	znp->zn_data = malloc(znp->zn_dataalloc, M_ZLFS, M_WAITOK | M_ZERO);
 	znp->zn_datalen = zi->zi_size;
 
 	for (off = 0; off < zi->zi_size; off += bsize) {
 		blkno = off / bsize;
-		if (blkno >= ZLFS_NDADDR || zi->zi_db[blkno] == 0) {
+		error = zlfs_bmap_read(znp, blkno, &ind, &lba);
+		if (error != 0)
+			goto fail;
+		if (lba == 0) {
 			error = EIO;
 			goto fail;
 		}
-		error = zlfs_bread_block(zmp, zi->zi_db[blkno], &bp);
+		error = zlfs_bread_block(zmp, lba, &bp);
 		if (error != 0)
 			goto fail;
 		n = bsize;
@@ -86,11 +150,16 @@ zlfs_node_load(struct zlfs_node *znp)
 		memcpy(znp->zn_data + off, bp->b_data, n);
 		brelse(bp);
 	}
+	if (ind != NULL)
+		brelse(ind);
 	return 0;
 
 fail:
-	free(znp->zn_data, M_ZLFS, maxsz);
+	if (ind != NULL)
+		brelse(ind);
+	free(znp->zn_data, M_ZLFS, znp->zn_dataalloc);
 	znp->zn_data = NULL;
+	znp->zn_dataalloc = 0;
 	return error;
 }
 
@@ -129,6 +198,10 @@ zlfs_commit_node(struct zlfs_mount *zmp, struct zlfs_node *znp)
 	}
 
 	if (znp->zn_data != NULL) {
+		u_int64_t nindir = ZLFS_NINDIR(zmp);
+		u_int8_t *iblk = NULL;
+		int used_indir = 0;
+
 		if (znp->zn_datalen > ZLFS_MAXFILESZ(zmp))
 			return EFBIG;
 		blk = malloc(bsize, M_ZLFS, M_WAITOK);
@@ -136,28 +209,59 @@ zlfs_commit_node(struct zlfs_mount *zmp, struct zlfs_node *znp)
 		zi->zi_blocks = 0;
 		for (blkno = 0; blkno < ZLFS_NDADDR; blkno++)
 			zi->zi_db[blkno] = 0;
+		zi->zi_ib[0] = 0;
 		for (off = 0; off < znp->zn_datalen; off += bsize) {
 			blkno = off / bsize;
 			error = zlfs_alloc_block(zmp, &lba);
-			if (error != 0) {
-				free(blk, M_ZLFS, bsize);
-				return error;
-			}
+			if (error != 0)
+				goto data_fail;
 			memset(blk, 0, bsize);
 			n = bsize;
 			if (off + n > znp->zn_datalen)
 				n = znp->zn_datalen - off;
 			memcpy(blk, znp->zn_data + off, n);
 			error = zlfs_write_block(zmp, lba, blk);
-			if (error != 0) {
-				free(blk, M_ZLFS, bsize);
-				return error;
+			if (error != 0)
+				goto data_fail;
+			if (blkno < ZLFS_NDADDR) {
+				zi->zi_db[blkno] = lba;
+			} else {
+				if (blkno - ZLFS_NDADDR >= nindir) {
+					error = EFBIG;
+					goto data_fail;
+				}
+				if (iblk == NULL)
+					iblk = malloc(bsize, M_ZLFS,
+					    M_WAITOK | M_ZERO);
+				((u_int64_t *)iblk)[blkno - ZLFS_NDADDR] =
+				    htole64(lba);
+				used_indir = 1;
 			}
-			zi->zi_db[blkno] = lba;
+			zi->zi_blocks++;
+		}
+		/* Write the single indirect block, if the file needed one. */
+		if (used_indir) {
+			error = zlfs_alloc_block(zmp, &lba);
+			if (error != 0)
+				goto data_fail;
+			error = zlfs_write_block(zmp, lba, iblk);
+			if (error != 0)
+				goto data_fail;
+			zi->zi_ib[0] = lba;
 			zi->zi_blocks++;
 		}
 		free(blk, M_ZLFS, bsize);
+		if (iblk != NULL)
+			free(iblk, M_ZLFS, bsize);
+		goto write_inode;
+data_fail:
+		free(blk, M_ZLFS, bsize);
+		if (iblk != NULL)
+			free(iblk, M_ZLFS, bsize);
+		return error;
 	}
+
+write_inode:
 
 	error = zlfs_alloc_block(zmp, &lba);
 	if (error != 0)

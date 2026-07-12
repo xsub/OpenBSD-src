@@ -327,10 +327,11 @@ that can present SCSI ZBC semantics.
 9. Evaluate filesystem and buffer-cache implications before enabling general
    writable host-managed devices.
 10. Grow ZLFS from the validated raw write-pointer contract: the on-disk
-    format, `newfs_zlfs`, the in-kernel zone report API, `mount_zlfs`, and
-    the read and log-structured write paths are done and validated end to
-    end on the VM; next are indirect blocks, subdirectories, `unlink`, a
-    cleaner, and durability (see "ZLFS Status And Direction").
+    format, `newfs_zlfs`, the in-kernel zone report API, `mount_zlfs`, the
+    read and log-structured write paths, subdirectories, `unlink`, a
+    durable cache-flushed commit, and single-indirect (larger) files are
+    done; next are a cleaner and `rename` (see "ZLFS Status And
+    Direction").
 
 ## ZLFS Status And Direction
 
@@ -348,8 +349,9 @@ On-disk format (`sys/sys/zlfs.h`):
   documents append rules, mount discovery, the block-size bootstrap, and
   the both-zones-full crash recovery case.
 - The checkpoint locates a block-sized inode map (inode number to device
-  LBA) and the root inode.  Directories are flat arrays of fixed 128-byte
-  entries.  Inodes carry direct block pointers.
+  LBA) and the root inode.  Directories are arrays of fixed 128-byte
+  entries.  Inodes carry twelve direct block pointers plus a single
+  indirect block.
 
 Userland:
 
@@ -372,36 +374,42 @@ Kernel (`sys/zlfs/`):
   per-zone allocator state, all validated against device geometry with
   every on-disk field bounded before use.
 - Read: a per-mount vnode cache, `lookup`/`readdir`/`read` over on-disk
-  inodes, directories, and direct data blocks.
+  inodes, directories, and both direct and single-indirect data blocks.
 - Write: a raw zoned-write primitive (`dk_zone_write_kern`, a direct
   `WRITE(16)` bypassing the buffer cache and the host-managed write gate),
-  an append-only log allocator, and `create`/`write`/`fsync`/truncate.
-  A commit flushes all dirty inodes as a fresh log segment (data, inode
-  blocks, a new inode map, a new checkpoint) and then appends a
+  an append-only log allocator, and `create`/`write`/`fsync`/truncate,
+  `mkdir`/`rmdir`, and `unlink`.  Regular files grow past the twelve
+  direct blocks through a single indirect block, and the in-core file
+  buffer grows on demand rather than reserving the maximum up front.
+  Directories nest: `..` resolves to the real parent, and directory link
+  counts track subdirectories.  A commit flushes all dirty inodes as a
+  fresh log segment (data, indirect and inode blocks, a new inode map, a
+  new checkpoint), issues a `SYNCHRONIZE CACHE`, and then appends a
   generation N+1 superblock, which is the atomic commit point: nothing
   live is overwritten, so a crash before that append leaves the previous
   checkpoint in force and merely orphans the new blocks.
 
 Current limitations (documented in the code; each is a natural next step):
 
-- Direct blocks only (files up to `ZLFS_NDADDR` blocks); no indirect
-  blocks yet.
-- Single-block directories; a flat root directory only, no subdirectories.
-- No `unlink`/`rename` yet.
-- No garbage collector: orphaned and superseded blocks are not reclaimed,
-  and a filled superblock zone is not reset.
-- No cache flush (`SYNCHRONIZE CACHE`/FUA) before the superblock append,
-  so power-loss durability is not yet guaranteed against a write-back
-  device cache.
+- Single indirect block only: files are capped at
+  `ZLFS_NDADDR + block_size/8` blocks (about 2 MB at a 4 KB block size);
+  no double or triple indirect blocks yet.
+- Each open file or directory is buffered whole in core, so the maximum
+  file size is also bounded by available memory; there is no block-level
+  buffer-cache integration.
+- No `rename` yet.
+- No garbage collector: orphaned and superseded blocks (including those
+  freed by `unlink`/`rmdir` and truncation) are not reclaimed, and a
+  filled superblock zone is not reset.
 - The commit path is not yet safe against concurrent vnode operations.
 
 Remaining sequence toward a general-purpose filesystem:
 
-1. Indirect blocks (larger files) and multi-block directories.
-2. `mkdir`/subdirectories, then `unlink`/`rename`.
+1. Double/triple indirect blocks and block-level buffer-cache integration
+   (so files need not be buffered whole).
+2. `rename`.
 3. A cleaner/garbage collector and superblock-zone reset.
-4. A cache flush before the superblock append for real durability.
-5. Concurrency-safe commit and buffer-cache integration.
+4. Concurrency-safe commit.
 
 ## Non-Goals For The Current Prototype
 
