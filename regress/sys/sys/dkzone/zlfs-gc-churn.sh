@@ -3,19 +3,21 @@ set -eu
 
 # ZLFS data-zone cleaner churn test.
 #
-# Exercises the garbage collector and the circular log allocator: the
-# churn loop writes and removes far more data than one linear pass over
-# the data zones can hold.  Without the cleaner the filesystem returns
-# a permanent ENOSPC partway through; with it the loop must complete,
-# and a keeper file written before the churn must survive both the
-# churn and a remount with its contents intact.
+# Exercises the garbage collector and the circular log allocator: each
+# iteration writes about one zone's worth of files (32 x 2MB) and
+# removes them again, and the default 150 iterations fill more zones
+# than the device has (126 data zones on the QEMU ZNS test disk), so
+# merely completing the loop proves dead zones were reclaimed and
+# reused -- without the cleaner a permanent ENOSPC is unavoidable.  A
+# keeper file written before the churn must survive both the churn and
+# a remount with its contents intact.
 #
 # WARNING: this reformats the given disk with newfs_zlfs.
 
 usage()
 {
-	echo "usage: $0 disk [mount-point [iterations]]" >&2
-	echo "example: $0 sd1c /mnt/zlfs 300" >&2
+	echo "usage: $0 disk [mount-point [iterations [files-per-iter]]]" >&2
+	echo "example: $0 sd1c /mnt/zlfs 150 32" >&2
 	echo "warning: this reformats the disk with newfs_zlfs" >&2
 	exit 1
 }
@@ -32,26 +34,12 @@ section()
 	echo "== $* =="
 }
 
-case $# in
-1)
-	disk=$1
-	mnt=/mnt/zlfs
-	iters=300
-	;;
-2)
-	disk=$1
-	mnt=$2
-	iters=300
-	;;
-3)
-	disk=$1
-	mnt=$2
-	iters=$3
-	;;
-*)
-	usage
-	;;
-esac
+disk=${1-}
+mnt=${2-/mnt/zlfs}
+iters=${3-150}
+nfiles=${4-32}
+
+[ -n "$disk" ] && [ $# -le 4 ] || usage
 
 dev=/dev/$disk
 
@@ -68,19 +56,24 @@ dd if=/dev/random of="$mnt/keeper" bs=4k count=100 2>/dev/null
 sync
 k0=$(cksum < "$mnt/keeper")
 
-# Each iteration writes ~2MB (the current single-indirect maximum) and
-# removes it after a sync, so the dead blocks become reclaimable one
-# commit later.  The default 300 iterations churn far beyond one linear
-# pass over the data zones, proving wrap-around and reclaim.
-section "churn: $iters x (write 2MB, sync, rm, sync)"
+# Each file is ~2MB (the current single-indirect maximum), so nfiles
+# of them fill about one 64MB zone per iteration; the dead blocks
+# become reclaimable one commit after the removal.
+section "churn: $iters x ($nfiles x 2MB write, sync, rm, sync)"
+mkdir "$mnt/churn"
 i=0
 while [ "$i" -lt "$iters" ]; do
-	dd if=/dev/zero of="$mnt/churn" bs=4k count=500 2>/dev/null
+	j=0
+	while [ "$j" -lt "$nfiles" ]; do
+		dd if=/dev/zero of="$mnt/churn/f$j" bs=4k count=500 \
+		    2>/dev/null
+		j=$((j + 1))
+	done
 	sync
-	rm "$mnt/churn"
+	rm "$mnt"/churn/f*
 	sync
 	i=$((i + 1))
-	[ $((i % 50)) -eq 0 ] &&
+	[ $((i % 25)) -eq 0 ] &&
 	    echo "  ...$i iterations, df: $(df -k "$mnt" | tail -1)"
 done
 echo "  ok: $iters churn iterations, no ENOSPC"
