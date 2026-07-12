@@ -54,7 +54,6 @@ struct zlfs_mount {
 	u_int64_t	 zm_log_lba;	/* next free device LBA */
 	u_int64_t	 zm_log_zend;	/* end LBA of the current log zone */
 	u_int64_t	 zm_log_zidx;	/* current data zone index */
-	u_int64_t	 zm_next_ino;	/* next inode number to allocate */
 
 	/* Superblock-log head (generation ping-pong across zones 0-1). */
 	u_int64_t	 zm_sb_lba;	/* next free LBA in the active SB zone */

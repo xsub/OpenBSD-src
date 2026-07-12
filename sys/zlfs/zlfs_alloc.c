@@ -352,8 +352,6 @@ zlfs_log_init(struct zlfs_mount *zmp, const struct dk_zone *sbz)
 		zmp->zm_ninodes = ZLFS_FIRST_INO;
 	}
 
-	/* New inodes are appended at the end of the inode map. */
-	zmp->zm_next_ino = zmp->zm_ninodes;
 	return 0;
 }
 

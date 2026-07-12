@@ -65,12 +65,14 @@ i=0
 while [ "$i" -lt "$iters" ]; do
 	j=0
 	while [ "$j" -lt "$nfiles" ]; do
-		dd if=/dev/zero of="$mnt/churn/f$j" bs=4k count=500 \
-		    2>/dev/null
+		out=$(dd if=/dev/zero of="$mnt/churn/f$j" bs=4k count=500 \
+		    2>&1) ||
+		    die "write failed at iteration $i file f$j: $out"
 		j=$((j + 1))
 	done
 	sync
-	rm "$mnt"/churn/f*
+	rm "$mnt"/churn/f* ||
+	    die "rm failed at iteration $i"
 	sync
 	i=$((i + 1))
 	[ $((i % 25)) -eq 0 ] &&

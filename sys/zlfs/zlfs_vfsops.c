@@ -441,7 +441,7 @@ loop:
 int
 zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 {
-	struct zlfs_node *znp;
+	struct zlfs_node *znp, *lnp;
 	struct vnode *vp;
 	u_int64_t ino, maxino;
 	int error;
@@ -450,9 +450,6 @@ zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 	if (zmp->zm_rdonly)
 		return EROFS;
 	maxino = zmp->zm_super.zs_block_size / sizeof(u_int64_t);
-	if (zmp->zm_next_ino >= maxino)
-		return ENOSPC;
-	ino = zmp->zm_next_ino;
 
 	error = getnewvnode(VT_ZLFS, zmp->zm_mountp, &zlfs_vops, &vp);
 	if (error != 0)
@@ -463,8 +460,8 @@ zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 	vp->v_data = znp;
 	znp->zn_vnode = vp;
 	znp->zn_zmp = zmp;
-	znp->zn_ino = ino;
-	znp->zn_dinode.zi_ino = ino;
+	/* Constant generation: fine until NFS file handles are wired;
+	 * then reuse of an inode number must bump it. */
 	znp->zn_dinode.zi_gen = 1;
 	znp->zn_dinode.zi_mode = mode;
 	znp->zn_dinode.zi_nlink = 1;
@@ -482,8 +479,36 @@ zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 	znp->zn_datalen = 0;
 	zlfs_node_dirty(znp);
 
+	/*
+	 * Claim the lowest free inode number: absent from the inode map
+	 * and not owned by any in-core inode.  The in-core check matters
+	 * twice over -- a freshly created inode has no map entry until it
+	 * commits, and an unlinked-but-open one has lost its map entry but
+	 * still lives.  Numbers of removed files are reused, so churning
+	 * workloads do not exhaust the map (one block, 512 entries).
+	 */
 	rw_enter_write(&zmp->zm_lock);
-	zmp->zm_next_ino = ino + 1;
+	for (ino = ZLFS_FIRST_INO; ino < maxino; ino++) {
+		if (ino < zmp->zm_ninodes && zmp->zm_imap[ino] != 0)
+			continue;
+		LIST_FOREACH(lnp, &zmp->zm_nodes, zn_entry) {
+			if (lnp->zn_ino == ino)
+				break;
+		}
+		if (lnp == NULL)
+			break;
+	}
+	if (ino >= maxino) {
+		rw_exit_write(&zmp->zm_lock);
+		/* Dispose through the usual dead-inode path. */
+		znp->zn_dinode.zi_nlink = 0;
+		znp->zn_dirty = 0;
+		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
+		vput(vp);
+		return ENOSPC;
+	}
+	znp->zn_ino = ino;
+	znp->zn_dinode.zi_ino = ino;
 	if (ino + 1 > zmp->zm_ninodes)
 		zmp->zm_ninodes = ino + 1;
 	zmp->zm_imap[ino] = 0;

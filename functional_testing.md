@@ -33,7 +33,8 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 
 | Feature | Commit | Verified so far | Missing evidence |
 |---|---|---|---|
-| Data-zone garbage collection (3-pass live set, dead-zone reset) + log wrap-around | `16103441ec6` | 3 adversarial rounds (final: pass); churn v1 ran but woke neither cleaner nor wrap (only ~10/126 zones touched — see §6) | churn v2 (`zlfs-gc-churn.sh` @ `566048ccae4`: 150 x ~64 MB = 150 zone-fills > 126 zones): loop must complete, df sawtooth ~iter 120, keeper intact |
+| Data-zone garbage collection (3-pass live set, dead-zone reset) + log wrap-around | `16103441ec6` | 3 adversarial rounds (final: pass); churn v1 ran but woke neither cleaner nor wrap (only ~10/126 zones touched — see §6); churn v2 run #1 (ZBD#11, 2026-07-12) died at ~iteration 16 on inode-number exhaustion — a real defect the test was built to smoke out (see §6) | rerun churn v2 after the inode-reuse fix (kernel rebuild required): loop must complete, df sawtooth ~iter 120, keeper intact |
+| Inode-number reuse in `zlfs_ialloc` (lowest free: absent from map and from in-core list) | pending push | found by churn v2; fix + disposal path for the ENOSPC case | adversarial round, then the same churn v2 rerun proves it (32 new inodes per iteration, 150 iterations = 4800 creates against a 512-entry map) |
 | SB-zone recycling (reset stale SB zone on ping-pong) | `422cb631771` | 2 adversarial rounds (caught FWRITE and wp-tracking bugs, then pass) | never exercised on VM: one SB zone holds 16384 superblocks (131072 LBAs / 8 per SB), so the first ping-pong needs ~16k commits; churn v2 produces ~300 — a dedicated many-commit test or a smaller-zone QEMU profile is needed |
 
 ## 3. Under analysis / known gaps
@@ -44,6 +45,7 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 | Corrupt-metadata hardening | a self-referential indirect entry (entry LBA == `zi_ib[0]`) would sleep forever in `getblk` (B_BUSY held by caller) | unreachable with well-formed metadata (allocator hands out distinct LBAs) | add bounds/identity checks on indirect entries when fsck-style validation is designed |
 | `statfs` free-space approximation | `f_bfree` counts EMPTY-condition zones only; mixed zones count as used; live_bytes is a zero/nonzero flag, inflated by duplicate marking | cosmetic accounting | proper per-zone byte accounting with the copying cleaner |
 | `zst_live_bytes` semantics | only tested against 0 in the reset loop; not a true byte count | none today; trap for future code | rename or fix when the copying cleaner needs real counts |
+| Inode map is a single block | hard cap of 512 inode numbers (510 usable files/dirs alive at once); numbers are now reused after removal, but the live-count ceiling stands | churning workloads fine; wide trees will hit ENOSPC at 510 live inodes | multi-block inode map (format change) |
 
 ## 4. Later (roadmap order)
 
@@ -84,3 +86,5 @@ push.  "Round N" = one such multi-agent pass.
 | data GC round 2 | unlinked-but-open file in neither imap after its removal commits; open fd then reads from a resettable zone | bug (cross-file data exposure) | verify round | pass 3: mark blocks of every in-core vnode |
 | data GC round 2 | commit gate double-counted a virgin log-head zone (in `freecount` AND `headfree`) -> cleaner skipped, spurious mid-commit ENOSPC | bug | verify round | `freecount` skips `zm_log_zidx` |
 | data GC test | churn v1 (300 x 2 MB) touched ~10/126 zones — passed without exercising cleaner or wrap (df: linear growth to 8%, no sawtooth) | test gap | VM run analysis | churn v2: 32 x 2 MB per iteration (~1 zone), 150 iterations (`566048ccae4`) |
+| inode allocation | inode numbers never reused: `zm_next_ino` only grows, map is one block (512 entries) -> churn v2 hit ENOSPC in `create` at ~iteration 16 (ino 512 = 4 + 16 x 32); churn v1 passed only because 300 single-file creates stayed at ino 303 | blocker for churning workloads | churn v2 on VM (ZBD#11, 2026-07-12) | `zlfs_ialloc` claims the lowest ino absent from both the map and the in-core list, under `zm_lock`; ENOSPC path disposes the fresh vnode through the dead-inode path |
+| GC test tooling | script died silently: `dd 2>/dev/null` swallowed the ENOSPC message and `set -e` aborted with no output after the section header | test-tooling gap | VM run | capture dd stderr and `die` with iteration/file context |
