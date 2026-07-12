@@ -113,6 +113,9 @@ zlfs_dir_add(struct zlfs_node *dnp, const char *name, int namlen,
 	if (slot == (u_int64_t)-1) {
 		if (dnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXFILESZ(zmp))
 			return ENOSPC;
+		error = zlfs_node_resize(dnp, dnp->zn_datalen + ZLFS_DIRENT_SIZE);
+		if (error != 0)
+			return error;
 		slot = dnp->zn_datalen;
 		dnp->zn_datalen += ZLFS_DIRENT_SIZE;
 		dnp->zn_dinode.zi_size = dnp->zn_datalen;
@@ -352,9 +355,14 @@ zlfs_setattr(void *v)
 		error = zlfs_node_load(znp);
 		if (error != 0)
 			return error;
-		if (vap->va_size > znp->zn_datalen)
+		if (vap->va_size > znp->zn_datalen) {
+			error = zlfs_node_resize(znp, vap->va_size);
+			if (error != 0)
+				return error;
+			/* Zero the grown region (the buffer may be reused). */
 			memset(znp->zn_data + znp->zn_datalen, 0,
 			    vap->va_size - znp->zn_datalen);
+		}
 		znp->zn_datalen = vap->va_size;
 		znp->zn_dinode.zi_size = vap->va_size;
 		zlfs_node_dirty(znp);
@@ -364,7 +372,8 @@ zlfs_setattr(void *v)
 
 /*
  * Read regular-file data.  Modified files are served from their in-core
- * copy; clean files are read from the direct block pointers on disk.
+ * copy; clean files are read on disk through zlfs_bmap_read, which
+ * follows the direct and single-indirect block pointers.
  */
 int
 zlfs_read(void *v)
@@ -375,7 +384,7 @@ zlfs_read(void *v)
 	struct zlfs_node *znp = VTOZ(vp);
 	struct zlfs_mount *zmp = znp->zn_zmp;
 	struct zlfs_inode *zi = &znp->zn_dinode;
-	struct buf *bp;
+	struct buf *bp, *ind = NULL;
 	u_int64_t blkno, boff, size;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
 	size_t n;
@@ -404,6 +413,8 @@ zlfs_read(void *v)
 
 	size = zi->zi_size;
 	while (uio->uio_resid > 0 && (u_int64_t)uio->uio_offset < size) {
+		u_int64_t lba;
+
 		blkno = uio->uio_offset / bsize;
 		boff = uio->uio_offset % bsize;
 		n = bsize - boff;
@@ -412,23 +423,29 @@ zlfs_read(void *v)
 		if (n > uio->uio_resid)
 			n = uio->uio_resid;
 
-		if (blkno >= ZLFS_NDADDR || zi->zi_db[blkno] == 0)
-			return EIO;
-		error = zlfs_bread_block(zmp, zi->zi_db[blkno], &bp);
+		error = zlfs_bmap_read(znp, blkno, &ind, &lba);
+		if (error == 0 && lba == 0)
+			error = EIO;
 		if (error != 0)
-			return error;
+			break;
+		error = zlfs_bread_block(zmp, lba, &bp);
+		if (error != 0)
+			break;
 		error = uiomove((u_int8_t *)bp->b_data + boff, n, uio);
 		brelse(bp);
 		if (error != 0)
 			break;
 	}
+	if (ind != NULL)
+		brelse(ind);
 
 	return error;
 }
 
 /*
  * Write regular-file data into the in-core copy; it reaches disk at the
- * next commit.  Only direct-block-sized files are supported.
+ * next commit.  The buffer grows on demand up to the maximum file size
+ * (direct blocks plus one single-indirect block).
  */
 int
 zlfs_write(void *v)
@@ -459,12 +476,16 @@ zlfs_write(void *v)
 	if (error != 0)
 		return error;
 
+	end = off + n;
+	error = zlfs_node_resize(znp, end);
+	if (error != 0)
+		return error;
+
 	/* Zero any gap created by writing past the current end. */
 	if (off > znp->zn_datalen)
 		memset(znp->zn_data + znp->zn_datalen, 0,
 		    off - znp->zn_datalen);
 
-	end = off + n;
 	error = uiomove(znp->zn_data + off, n, uio);
 	if (error != 0)
 		return error;
@@ -579,6 +600,11 @@ zlfs_mkdir(void *v)
 	np->zn_dinode.zi_nlink = 2;	/* "." and the parent's entry */
 
 	/* Lay down the new directory's "." and ".." entries. */
+	error = zlfs_node_resize(np, 2 * ZLFS_DIRENT_SIZE);
+	if (error != 0) {
+		zlfs_idrop(vp);
+		goto bad;
+	}
 	memset(&zd, 0, sizeof(zd));
 	zd.zd_ino = htole64(np->zn_ino);
 	zd.zd_type = DT_DIR;
@@ -796,7 +822,7 @@ zlfs_reclaim(void *v)
 			rw_exit_write(&zmp->zm_lock);
 		}
 		if (znp->zn_data != NULL)
-			free(znp->zn_data, M_ZLFS, ZLFS_MAXFILESZ(zmp));
+			free(znp->zn_data, M_ZLFS, znp->zn_dataalloc);
 		cache_purge(vp);
 		free(znp, M_ZLFS, sizeof(*znp));
 	}

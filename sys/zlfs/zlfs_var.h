@@ -74,12 +74,21 @@ struct zlfs_node {
 	int		 zn_dirty;	/* needs commit */
 	u_int8_t	*zn_data;	/* in-core file/dir contents, or NULL */
 	size_t		 zn_datalen;	/* valid bytes in zn_data */
+	size_t		 zn_dataalloc;	/* bytes allocated for zn_data */
 	struct zlfs_inode zn_dinode;	/* host-endian inode copy */
 };
 
-/* Largest file the direct-block-only write path supports. */
+/* Data-block pointers held in one single-indirect block. */
+#define ZLFS_NINDIR(zmp) \
+	((u_int64_t)(zmp)->zm_super.zs_block_size / sizeof(u_int64_t))
+
+/*
+ * Largest file the write path supports: the direct blocks plus one
+ * single-indirect block.  Double/triple indirect are not yet used.
+ */
 #define ZLFS_MAXFILESZ(zmp) \
-	(ZLFS_NDADDR * (u_int64_t)(zmp)->zm_super.zs_block_size)
+	((ZLFS_NDADDR + ZLFS_NINDIR(zmp)) * \
+	    (u_int64_t)(zmp)->zm_super.zs_block_size)
 
 #define VFSTOZLFS(mp)	((struct zlfs_mount *)((mp)->mnt_data))
 #define VTOZ(vp)	((struct zlfs_node *)(vp)->v_data)
@@ -115,7 +124,10 @@ int		zlfs_alloc_block(struct zlfs_mount *, u_int64_t *);
 
 /* zlfs_write.c */
 int		zlfs_write_block(struct zlfs_mount *, u_int64_t, const void *);
+int		zlfs_bmap_read(struct zlfs_node *, u_int64_t, struct buf **,
+		    u_int64_t *);
 int		zlfs_node_load(struct zlfs_node *);
+int		zlfs_node_resize(struct zlfs_node *, size_t);
 void		zlfs_node_dirty(struct zlfs_node *);
 int		zlfs_commit(struct zlfs_mount *);
 
