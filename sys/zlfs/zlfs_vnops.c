@@ -33,6 +33,7 @@ int	zlfs_create(void *);
 int	zlfs_mkdir(void *);
 int	zlfs_rmdir(void *);
 int	zlfs_remove(void *);
+int	zlfs_rename(void *);
 int	zlfs_access(void *);
 int	zlfs_getattr(void *);
 int	zlfs_setattr(void *);
@@ -724,6 +725,139 @@ out:
 	return error;
 }
 
+/*
+ * Rename.  The VOP_RENAME wrapper does no vnode disposal, so this owns
+ * all four: fdvp/fvp arrive referenced and unlocked, tdvp/tvp (tvp may
+ * be NULL) referenced and exclusively locked; every path must release
+ * the two refs, plus unlock and release tdvp/tvp.  The pathname buffers
+ * belong to the caller (dorenameat frees them), so they are not touched
+ * here.
+ *
+ * This is a bring-up rename: it works on the in-core directory buffers
+ * without the tmpfs-style relock dance, consistent with the mount's
+ * documented single-threaded-commit assumption.  Reparenting a
+ * directory to a different parent (updating "..", the parent link
+ * counts, and rejecting a move into its own subtree) is not yet done.
+ */
+int
+zlfs_rename(void *v)
+{
+	struct vop_rename_args *ap = v;
+	struct vnode *fdvp = ap->a_fdvp, *fvp = ap->a_fvp;
+	struct vnode *tdvp = ap->a_tdvp, *tvp = ap->a_tvp;
+	struct componentname *fcnp = ap->a_fcnp, *tcnp = ap->a_tcnp;
+	struct zlfs_node *fdnp = VTOZ(fdvp), *fnp = VTOZ(fvp);
+	struct zlfs_node *tdnp = VTOZ(tdvp);
+	struct zlfs_node *tnp = (tvp != NULL) ? VTOZ(tvp) : NULL;
+	struct zlfs_mount *zmp = fdnp->zn_zmp;
+	u_int8_t ftype;
+	int error = 0;
+
+	/* Same filesystem only. */
+	if (fvp->v_mount != tdvp->v_mount ||
+	    (tvp != NULL && fvp->v_mount != tvp->v_mount)) {
+		error = EXDEV;
+		goto out;
+	}
+	if (zmp->zm_rdonly) {
+		error = EROFS;
+		goto out;
+	}
+	/* Reject "." and ".." as the source name. */
+	if ((fcnp->cn_namelen == 1 && fcnp->cn_nameptr[0] == '.') ||
+	    (fcnp->cn_namelen == 2 && fcnp->cn_nameptr[0] == '.' &&
+	    fcnp->cn_nameptr[1] == '.')) {
+		error = EINVAL;
+		goto out;
+	}
+	/* The source may not be the target directory itself. */
+	if (fvp == tdvp) {
+		error = EINVAL;
+		goto out;
+	}
+	if (tcnp->cn_namelen > ZLFS_MAXNAMLEN) {
+		error = ENAMETOOLONG;
+		goto out;
+	}
+	/* Cross-directory directory moves are not yet supported. */
+	if (fvp->v_type == VDIR && fdvp != tdvp) {
+		error = EINVAL;
+		goto out;
+	}
+
+	ftype = (fvp->v_type == VDIR) ? DT_DIR : DT_REG;
+
+	/*
+	 * Do everything that can fail up front, before any destructive
+	 * change, so the rename is all-or-nothing: POSIX requires that a
+	 * failed rename leave both names in place.  Load both directories,
+	 * check the target, and -- when a new entry must be appended to a
+	 * different target directory -- reserve its slot now.  After this
+	 * point the source detach, target teardown, and reattach below
+	 * cannot fail: the reattach always finds a freed slot (the detached
+	 * source's, or the removed target's) or the reserved space.
+	 */
+	error = zlfs_node_load(fdnp);
+	if (error != 0)
+		goto out;
+	error = zlfs_node_load(tdnp);
+	if (error != 0)
+		goto out;
+	if (tnp != NULL && tvp->v_type == VDIR && !zlfs_dir_empty(tnp)) {
+		error = ENOTEMPTY;
+		goto out;
+	}
+	if (tnp == NULL && fdvp != tdvp) {
+		if (tdnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXFILESZ(zmp)) {
+			error = ENOSPC;
+			goto out;
+		}
+		error = zlfs_node_resize(tdnp,
+		    tdnp->zn_datalen + ZLFS_DIRENT_SIZE);
+		if (error != 0)
+			goto out;
+	}
+
+	/*
+	 * Detach the source.  This is the first mutation, so an unexpected
+	 * ENOENT (the entry named by fcnp is gone) leaves everything else
+	 * untouched.  When the rename stays in one directory this frees the
+	 * slot the reattach reuses.
+	 */
+	error = zlfs_dir_remove(fdnp, fnp->zn_ino);
+	if (error != 0)
+		goto out;
+
+	/* Drop an existing target, freeing its slot in the target dir. */
+	if (tnp != NULL) {
+		(void)zlfs_dir_remove(tdnp, tnp->zn_ino);
+		if (tvp->v_type == VDIR && tdnp->zn_dinode.zi_nlink > 0)
+			tdnp->zn_dinode.zi_nlink--;	/* lost target's ".." */
+		tnp->zn_dinode.zi_nlink = 0;
+		tnp->zn_datalen = 0;
+		zmp->zm_imap[tnp->zn_ino] = 0;
+		zlfs_node_dirty(tnp);
+	}
+
+	/* Reattach the source under the new name; cannot fail now. */
+	error = zlfs_dir_add(tdnp, tcnp->cn_nameptr, tcnp->cn_namelen,
+	    fnp->zn_ino, ftype);
+	KASSERT(error == 0);
+	fnp->zn_dinode.zi_ctime = gettime();
+	zlfs_node_dirty(fnp);
+
+out:
+	VOP_UNLOCK(tdvp);
+	if (tvp != NULL && tvp != tdvp)
+		VOP_UNLOCK(tvp);
+	vrele(fvp);
+	if (tvp != NULL)
+		vrele(tvp);
+	vrele(fdvp);
+	vrele(tdvp);
+	return error;
+}
+
 int
 zlfs_fsync(void *v)
 {
@@ -916,7 +1050,7 @@ const struct vops zlfs_vops = {
 	.vop_fsync	= zlfs_fsync,
 	.vop_remove	= zlfs_remove,
 	.vop_link	= eopnotsupp,
-	.vop_rename	= eopnotsupp,
+	.vop_rename	= zlfs_rename,
 	.vop_mkdir	= zlfs_mkdir,
 	.vop_rmdir	= zlfs_rmdir,
 	.vop_symlink	= eopnotsupp,
