@@ -397,17 +397,21 @@ Current limitations (documented in the code; each is a natural next step):
 - Each open file or directory is buffered whole in core, so the maximum
   file size is also bounded by available memory; there is no block-level
   buffer-cache integration.
-- No `rename` yet.
+- `rename` handles files and same-directory renames (including
+  overwriting an existing target); moving a *directory* to a different
+  parent is rejected (`EINVAL`), since reparenting `..` and the
+  subtree-cycle check are not yet implemented.
 - No garbage collector: orphaned and superseded blocks (including those
-  freed by `unlink`/`rmdir` and truncation) are not reclaimed, and a
-  filled superblock zone is not reset.
+  freed by `unlink`/`rmdir`, `rename`, and truncation) are not reclaimed,
+  and a filled superblock zone is not reset.
 - The commit path is not yet safe against concurrent vnode operations.
 
 Remaining sequence toward a general-purpose filesystem:
 
 1. Double/triple indirect blocks and block-level buffer-cache integration
    (so files need not be buffered whole).
-2. `rename`.
+2. Cross-directory directory `rename` (reparent `..`, subtree-cycle
+   check).
 3. A cleaner/garbage collector and superblock-zone reset.
 4. Concurrency-safe commit.
 
