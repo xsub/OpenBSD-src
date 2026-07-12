@@ -160,6 +160,12 @@ int	dk_zone_write_kern(dev_t, u_int64_t, void *, size_t);
 
 /* Flush the device write cache to stable storage. */
 int	dk_zone_flush_kern(dev_t);
+
+/*
+ * Reset the zone containing absolute LBA lba to its start (RESET WRITE
+ * POINTER), discarding its contents.  The device must be an sd(4) disk.
+ */
+int	dk_zone_reset_kern(dev_t, u_int64_t);
 #endif /* _KERNEL */
 
 struct dk_zone_op {

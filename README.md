@@ -386,8 +386,12 @@ Kernel (`sys/zlfs/`):
   move of a directory into its own subtree).  A commit flushes all dirty inodes as a
   fresh log segment (data, indirect and inode blocks, a new inode map, a
   new checkpoint), issues a `SYNCHRONIZE CACHE`, and then appends a
-  generation N+1 superblock, which is the atomic commit point: nothing
-  live is overwritten, so a crash before that append leaves the previous
+  generation N+1 superblock, which is the atomic commit point.  When a
+  superblock zone fills, the log ping-pongs to the other zone, resetting
+  it first (`dk_zone_reset_kern`) so the two zones recycle indefinitely;
+  the reset is crash-safe because the live superblock stays in the
+  current zone until the new one is durably written.  Nothing live is
+  overwritten, so a crash before that append leaves the previous
   checkpoint in force and merely orphans the new blocks.
 
 Current limitations (documented in the code; each is a natural next step):
@@ -398,16 +402,18 @@ Current limitations (documented in the code; each is a natural next step):
 - Each open file or directory is buffered whole in core, so the maximum
   file size is also bounded by available memory; there is no block-level
   buffer-cache integration.
-- No garbage collector: orphaned and superseded blocks (including those
-  freed by `unlink`/`rmdir`, `rename`, and truncation) are not reclaimed,
-  and a filled superblock zone is not reset.
+- No data-zone garbage collector: orphaned and superseded blocks
+  (including those freed by `unlink`/`rmdir`, `rename`, and truncation)
+  in the data log are not yet reclaimed.  The superblock zones, however,
+  are recycled: when one fills, the log resets and reuses the other.
 - The commit path is not yet safe against concurrent vnode operations.
 
 Remaining sequence toward a general-purpose filesystem:
 
 1. Double/triple indirect blocks and block-level buffer-cache integration
    (so files need not be buffered whole).
-2. A cleaner/garbage collector and superblock-zone reset.
+2. A data-zone cleaner/garbage collector (segment liveness accounting and
+   live-block copying; the superblock zones already recycle).
 3. Concurrency-safe commit.
 
 ## Non-Goals For The Current Prototype

@@ -298,9 +298,23 @@ zlfs_commit_super(struct zlfs_mount *zmp, u_int8_t *blk, u_int64_t generation,
 	if (zmp->zm_sb_lba + bpb >
 	    zmp->zm_sb_zstart[zmp->zm_sb_zidx] + zmp->zm_sb_zcap) {
 		other = zmp->zm_sb_zidx ^ 1;
+		/*
+		 * Recycle the other superblock zone before switching into it.
+		 * It holds only superseded superblocks -- the live one is in
+		 * the current zone, which is left intact until the new
+		 * superblock below is written -- so the reset is crash-safe:
+		 * a failure any time before that write leaves the current
+		 * zone's superblock in force.
+		 */
 		if (zmp->zm_zones[other].zst_wp_lba !=
-		    zmp->zm_zones[other].zst_start_lba)
-			return ENOSPC;
+		    zmp->zm_zones[other].zst_start_lba) {
+			error = dk_zone_reset_kern(zmp->zm_dev,
+			    zmp->zm_sb_zstart[other]);
+			if (error != 0)
+				return error;
+			zmp->zm_zones[other].zst_wp_lba =
+			    zmp->zm_zones[other].zst_start_lba;
+		}
 		zmp->zm_sb_zidx = other;
 		zmp->zm_sb_lba = zmp->zm_sb_zstart[other];
 	}
@@ -328,6 +342,12 @@ zlfs_commit_super(struct zlfs_mount *zmp, u_int8_t *blk, u_int64_t generation,
 	if (error != 0)
 		return error;
 	zmp->zm_sb_lba += bpb;
+	/*
+	 * Track the active superblock zone's write pointer so the
+	 * empty-zone test on a later ping-pong sees a filled zone as
+	 * non-empty and resets it before switching back in.
+	 */
+	zmp->zm_zones[zmp->zm_sb_zidx].zst_wp_lba = zmp->zm_sb_lba;
 	return 0;
 }
 
