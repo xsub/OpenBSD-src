@@ -108,6 +108,7 @@ int	sd_ioctl_zonecmd(struct sd_softc *, struct dk_zone_op *, int);
 int	sd_zbc_report_zones_kern(struct sd_softc *, u_int64_t,
 	    struct dk_zone *, u_int32_t, u_int32_t *);
 int	sd_zone_write_kern(struct sd_softc *, u_int64_t, void *, size_t);
+int	sd_zone_reset_kern(struct sd_softc *, u_int64_t);
 int	sd_zbc_report_zones(struct sd_softc *, u_int64_t, u_int8_t, void *,
 	    u_int32_t, u_int32_t *, int);
 int	sd_zbc_zone_cmd(struct sd_softc *, u_int64_t, u_int8_t, int, int);
@@ -1899,6 +1900,62 @@ dk_zone_flush_kern(dev_t dev)
 	}
 
 	error = sd_flush(sc, 0);
+
+	device_unref(&sc->sc_dev);
+	return error;
+}
+
+/*
+ * Reset the zone containing absolute LBA lba to its start, discarding
+ * its contents (RESET WRITE POINTER).  Used by in-kernel consumers (the
+ * ZLFS superblock log) to recycle a zone whose data is no longer live.
+ * Tries the adapter pass-through (NVMe ZNS) first, then native SCSI ZBC.
+ */
+int
+sd_zone_reset_kern(struct sd_softc *sc, u_int64_t lba)
+{
+	struct scsi_link	*link = sc->sc_link;
+	struct dk_zone_op	 dzo;
+	u_int8_t		 service_action;
+	int			 error;
+
+	if (sc->zone_mode == DK_ZONE_MODE_NONE)
+		return EOPNOTSUPP;
+
+	memset(&dzo, 0, sizeof(dzo));
+	dzo.dzo_version = DK_ZONE_VERSION;
+	dzo.dzo_op = DK_ZONE_OP_RESET;
+	dzo.dzo_lba = lba;
+	/* FWRITE: a zone reset is a write; the adapter rejects it otherwise. */
+	error = scsi_do_ioctl(link, DIOCZONECMD, (caddr_t)&dzo, FWRITE);
+	if (error != ENOTTY)
+		return error;
+
+	if (!ISSET(sc->zone_flags, DK_ZONE_FLAG_RESET_SUP))
+		return EOPNOTSUPP;
+	error = sd_zbc_zone_action(DK_ZONE_OP_RESET, &service_action);
+	if (error != 0)
+		return error;
+	return sd_zbc_zone_cmd(sc, lba, service_action, 0, 0);
+}
+
+int
+dk_zone_reset_kern(dev_t dev, u_int64_t lba)
+{
+	struct sd_softc		*sc;
+	int			 error;
+
+	if (major(dev) >= nblkdev || bdevsw[major(dev)].d_open != sdopen)
+		return ENXIO;
+	sc = sdlookup(DISKUNIT(dev));
+	if (sc == NULL)
+		return ENXIO;
+	if (ISSET(sc->flags, SDF_DYING)) {
+		device_unref(&sc->sc_dev);
+		return ENXIO;
+	}
+
+	error = sd_zone_reset_kern(sc, lba);
 
 	device_unref(&sc->sc_dev);
 	return error;
