@@ -47,6 +47,7 @@ struct zlfs_mount {
 	struct zlfs_zone_state *zm_zones;
 	u_int64_t	*zm_imap;	/* inode -> device LBA, or NULL */
 	u_int64_t	 zm_ninodes;	/* number of zm_imap entries */
+	u_int64_t	 zm_imap_lba;	/* LBA of the committed inode map */
 	int		 zm_rdonly;	/* mounted read-only */
 
 	/* Data-log head (append point for new data/metadata blocks). */
@@ -96,6 +97,9 @@ struct zlfs_node {
 /* Byte offset of a device LBA. */
 #define ZLFS_LBATOB(zmp, lba)	((lba) * (u_int64_t)(zmp)->zm_secsize)
 
+/* Index of the device zone containing an LBA (zones are uniform). */
+#define ZLFS_ZONEOF(zmp, lba)	((lba) / (zmp)->zm_super.zs_zone_size_lba)
+
 extern const struct vops zlfs_vops;
 
 /* zlfs_vfsops.c */
@@ -113,14 +117,18 @@ int		zlfs_sb_discover(struct zlfs_mount *, const struct dk_zone *,
 int		zlfs_ckpt_load(struct zlfs_mount *);
 int		zlfs_read_dinode(struct zlfs_mount *, u_int64_t,
 		    struct zlfs_inode *);
+int		zlfs_read_dinode_at(struct zlfs_mount *, u_int64_t,
+		    struct zlfs_inode *);
 int		zlfs_bread_block(struct zlfs_mount *, u_int64_t, struct buf **);
 
 /* zlfs_alloc.c */
 int		zlfs_zones_load(struct zlfs_mount *);
 void		zlfs_zones_free(struct zlfs_mount *);
 u_int64_t	zlfs_zones_empty(struct zlfs_mount *);
+u_int64_t	zlfs_zones_freecount(struct zlfs_mount *);
 int		zlfs_log_init(struct zlfs_mount *, const struct dk_zone *);
 int		zlfs_alloc_block(struct zlfs_mount *, u_int64_t *);
+void		zlfs_clean(struct zlfs_mount *);
 
 /* zlfs_write.c */
 int		zlfs_write_block(struct zlfs_mount *, u_int64_t, const void *);

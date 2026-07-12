@@ -393,6 +393,15 @@ Kernel (`sys/zlfs/`):
   current zone until the new one is durably written.  Nothing live is
   overwritten, so a crash before that append leaves the previous
   checkpoint in force and merely orphans the new blocks.
+- Garbage collection: the data log is a circular allocator over the data
+  zones.  When free zones run low (or a segment might not fit), the
+  commit first runs a cleaner that computes every block reachable from
+  the durable checkpoint (re-read from disk, not trusted from memory),
+  from the in-core inode map, and from in-core vnodes (covering
+  unlinked-but-open files), then resets any written zone reachable from
+  none of them.  Only fully dead zones are reclaimed, and any read
+  failure aborts the scan without reclaiming, so a crash at any point
+  still recovers everything the durable checkpoint references.
 
 Current limitations (documented in the code; each is a natural next step):
 
@@ -402,18 +411,20 @@ Current limitations (documented in the code; each is a natural next step):
 - Each open file or directory is buffered whole in core, so the maximum
   file size is also bounded by available memory; there is no block-level
   buffer-cache integration.
-- No data-zone garbage collector: orphaned and superseded blocks
-  (including those freed by `unlink`/`rmdir`, `rename`, and truncation)
-  in the data log are not yet reclaimed.  The superblock zones, however,
-  are recycled: when one fills, the log resets and reuses the other.
+- The cleaner reclaims only fully dead zones; zones holding a mix of
+  live and superseded blocks are not compacted (a copying cleaner is
+  future work), so space in mixed zones is reclaimed only once
+  everything in them is superseded.
+- ZLFS blocks are read uncached (`B_INVAL`): raw zoned writes and zone
+  resets bypass the buffer cache, so caching would serve stale data once
+  a zone is recycled.  Proper buffer-cache integration is future work.
 - The commit path is not yet safe against concurrent vnode operations.
 
 Remaining sequence toward a general-purpose filesystem:
 
 1. Double/triple indirect blocks and block-level buffer-cache integration
-   (so files need not be buffered whole).
-2. A data-zone cleaner/garbage collector (segment liveness accounting and
-   live-block copying; the superblock zones already recycle).
+   (so files need not be buffered whole and reads cache safely).
+2. A copying cleaner (compact mixed live/dead zones).
 3. Concurrency-safe commit.
 
 ## Non-Goals For The Current Prototype

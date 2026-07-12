@@ -297,6 +297,12 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
  * Read one filesystem block (zs_block_size bytes) at device LBA lba.
  * Returns the buffer in *bpp on success; on error the buffer is
  * released and *bpp is NULL.
+ *
+ * The buffer is marked B_INVAL so brelse discards it instead of caching:
+ * every ZLFS write and zone reset goes through raw device commands that
+ * bypass the buffer cache, so once the cleaner recycles a zone a cached
+ * buffer for a reused LBA would silently serve the old zone's contents.
+ * Correctness over speed until ZLFS integrates with the buffer cache.
  */
 int
 zlfs_bread_block(struct zlfs_mount *zmp, u_int64_t lba, struct buf **bpp)
@@ -311,6 +317,7 @@ zlfs_bread_block(struct zlfs_mount *zmp, u_int64_t lba, struct buf **bpp)
 		*bpp = NULL;
 		return error;
 	}
+	bp->b_flags |= B_INVAL;
 	*bpp = bp;
 	return 0;
 }
@@ -391,28 +398,23 @@ zlfs_ckpt_load(struct zlfs_mount *zmp)
 		zmp->zm_imap[i] =
 		    letoh64(((u_int64_t *)bp->b_data)[i]);
 	zmp->zm_ninodes = ninodes;
+	zmp->zm_imap_lba = imap_lba;
 	brelse(bp);
 
 	return 0;
 }
 
 /*
- * Read the on-disk inode for ino into *zi (host-endian).  Returns
- * ENOENT for an out-of-range or absent inode.
+ * Read the on-disk inode block at device LBA lba into *zi (host-endian),
+ * without consulting the inode map.
  */
 int
-zlfs_read_dinode(struct zlfs_mount *zmp, u_int64_t ino, struct zlfs_inode *zi)
+zlfs_read_dinode_at(struct zlfs_mount *zmp, u_int64_t lba,
+    struct zlfs_inode *zi)
 {
 	struct buf *bp;
 	const struct zlfs_inode *dip;
-	u_int64_t lba;
 	int error, i;
-
-	if (ino >= zmp->zm_ninodes)
-		return ENOENT;
-	lba = zmp->zm_imap[ino];
-	if (lba == 0)
-		return ENOENT;
 
 	error = zlfs_bread_block(zmp, lba, &bp);
 	if (error != 0)
@@ -442,6 +444,29 @@ zlfs_read_dinode(struct zlfs_mount *zmp, u_int64_t ino, struct zlfs_inode *zi)
 		zi->zi_ib[i] = letoh64(dip->zi_ib[i]);
 	brelse(bp);
 
+	return 0;
+}
+
+/*
+ * Read the on-disk inode for ino into *zi (host-endian) through the
+ * in-core inode map.  Returns ENOENT for an out-of-range or absent
+ * inode.
+ */
+int
+zlfs_read_dinode(struct zlfs_mount *zmp, u_int64_t ino, struct zlfs_inode *zi)
+{
+	u_int64_t lba;
+	int error;
+
+	if (ino >= zmp->zm_ninodes)
+		return ENOENT;
+	lba = zmp->zm_imap[ino];
+	if (lba == 0)
+		return ENOENT;
+
+	error = zlfs_read_dinode_at(zmp, lba, zi);
+	if (error != 0)
+		return error;
 	if (zi->zi_ino != ino)
 		return EIO;
 	return 0;

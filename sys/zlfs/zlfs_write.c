@@ -27,6 +27,13 @@
 #include <zlfs/zlfs_var.h>
 
 /*
+ * Run the zone cleaner at the start of a commit when the number of free
+ * data zones drops below this, so a fresh segment always has somewhere
+ * to go if any dead zones can be reclaimed.
+ */
+#define ZLFS_GC_MIN_FREE	2
+
+/*
  * Write one filesystem block (block_size bytes) from data to device
  * LBA lba, staging through a DMA-capable buffer.
  */
@@ -384,6 +391,30 @@ zlfs_commit(struct zlfs_mount *zmp)
 		return 0;
 	}
 
+	/*
+	 * 0. Reclaim dead zones before allocating this segment, when free
+	 * zones run low or the segment's worst-case size (each dirty
+	 * inode's data blocks plus an indirect and an inode block, plus
+	 * the map and checkpoint) might not fit in what is left.  The
+	 * cleaner unions the durable (on-disk) and in-core live sets, so
+	 * it never resets a block either the last checkpoint or the
+	 * mounted filesystem can still reach.
+	 */
+	{
+		u_int64_t bpb = bsize / zmp->zm_secsize;
+		u_int64_t bpz = zmp->zm_super.zs_zone_cap_lba / bpb;
+		u_int64_t need = 2, headfree, freez;
+
+		LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
+			if (znp->zn_dirty)
+				need += howmany(znp->zn_datalen, bsize) + 2;
+		}
+		headfree = (zmp->zm_log_zend - zmp->zm_log_lba) / bpb;
+		freez = zlfs_zones_freecount(zmp);
+		if (freez < ZLFS_GC_MIN_FREE || freez * bpz + headfree < need)
+			zlfs_clean(zmp);
+	}
+
 	/* 1. Data and inode blocks for every dirty inode. */
 	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
 		if (!znp->zn_dirty)
@@ -445,6 +476,7 @@ zlfs_commit(struct zlfs_mount *zmp)
 	 */
 	zmp->zm_super.zs_generation = newgen;
 	zmp->zm_super.zs_checkpoint_lba = ckpt_lba;
+	zmp->zm_imap_lba = imap_lba;
 	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry)
 		znp->zn_dirty = 0;
 
