@@ -186,6 +186,73 @@ zlfs_dir_empty(struct zlfs_node *dnp)
 	return 1;
 }
 
+/* Repoint a directory's ".." entry at a new parent inode. */
+static int
+zlfs_dir_setdotdot(struct zlfs_node *dnp, u_int64_t parent)
+{
+	struct zlfs_dirent *zd;
+	u_int64_t off;
+	int error;
+
+	error = zlfs_node_load(dnp);
+	if (error != 0)
+		return error;
+
+	for (off = 0; off + ZLFS_DIRENT_SIZE <= dnp->zn_datalen;
+	    off += ZLFS_DIRENT_SIZE) {
+		zd = (struct zlfs_dirent *)(dnp->zn_data + off);
+		if (zd->zd_ino != 0 && zd->zd_namlen == 2 &&
+		    zd->zd_name[0] == '.' && zd->zd_name[1] == '.') {
+			zd->zd_ino = htole64(parent);
+			zlfs_node_dirty(dnp);
+			return 0;
+		}
+	}
+	return ENOENT;		/* a directory always has ".." */
+}
+
+/*
+ * Reject moving directory fnp into its own subtree: walk up from tdvp
+ * through the ".." chain to the root and fail with EINVAL if fnp is an
+ * ancestor of (or equal to) the destination directory.  Safe under the
+ * mount's single-threaded assumption; it briefly vgets each ancestor to
+ * read its "..".
+ */
+static int
+zlfs_rename_ancestor(struct zlfs_mount *zmp, struct zlfs_node *fnp,
+    struct vnode *tdvp)
+{
+	struct vnode *vp;
+	u_int64_t ino, parent, steps;
+	int error;
+
+	error = zlfs_dir_lookup(tdvp, "..", 2, &ino);
+	if (error != 0)
+		return error;
+
+	/*
+	 * A valid tree is at most zm_ninodes deep; bound the walk by that
+	 * so a corrupt on-disk ".." cycle fails rather than spins forever.
+	 */
+	for (steps = 0; ino != ZLFS_ROOT_INO; steps++) {
+		if (steps > zmp->zm_ninodes)
+			return ELOOP;
+		if (ino == fnp->zn_ino)
+			return EINVAL;		/* fnp is an ancestor */
+		error = VFS_VGET(zmp->zm_mountp, ino, &vp);
+		if (error != 0)
+			return error;
+		error = zlfs_dir_lookup(vp, "..", 2, &parent);
+		vput(vp);
+		if (error != 0)
+			return error;
+		if (parent == ino)		/* self-parent: stop */
+			break;
+		ino = parent;
+	}
+	return 0;
+}
+
 int
 zlfs_lookup(void *v)
 {
@@ -735,9 +802,9 @@ out:
  *
  * This is a bring-up rename: it works on the in-core directory buffers
  * without the tmpfs-style relock dance, consistent with the mount's
- * documented single-threaded-commit assumption.  Reparenting a
- * directory to a different parent (updating "..", the parent link
- * counts, and rejecting a move into its own subtree) is not yet done.
+ * documented single-threaded-commit assumption.  Moving a directory to a
+ * different parent reparents its ".." and moves the child link between
+ * the two parents, rejecting a move into the directory's own subtree.
  */
 int
 zlfs_rename(void *v)
@@ -751,7 +818,7 @@ zlfs_rename(void *v)
 	struct zlfs_node *tnp = (tvp != NULL) ? VTOZ(tvp) : NULL;
 	struct zlfs_mount *zmp = fdnp->zn_zmp;
 	u_int8_t ftype;
-	int error = 0;
+	int dirmove, error = 0;
 
 	/* Same filesystem only. */
 	if (fvp->v_mount != tdvp->v_mount ||
@@ -779,12 +846,9 @@ zlfs_rename(void *v)
 		error = ENAMETOOLONG;
 		goto out;
 	}
-	/* Cross-directory directory moves are not yet supported. */
-	if (fvp->v_type == VDIR && fdvp != tdvp) {
-		error = EINVAL;
-		goto out;
-	}
 
+	/* A move of a directory to a different parent reparents its "..". */
+	dirmove = (fvp->v_type == VDIR && fdvp != tdvp);
 	ftype = (fvp->v_type == VDIR) ? DT_DIR : DT_REG;
 
 	/*
@@ -806,6 +870,16 @@ zlfs_rename(void *v)
 	if (tnp != NULL && tvp->v_type == VDIR && !zlfs_dir_empty(tnp)) {
 		error = ENOTEMPTY;
 		goto out;
+	}
+	if (dirmove) {
+		/* Load fnp now so the ".." repoint below cannot fail, and
+		 * reject moving the directory into its own subtree. */
+		error = zlfs_node_load(fnp);
+		if (error != 0)
+			goto out;
+		error = zlfs_rename_ancestor(zmp, fnp, tdvp);
+		if (error != 0)
+			goto out;
 	}
 	if (tnp == NULL && fdvp != tdvp) {
 		if (tdnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXFILESZ(zmp)) {
@@ -843,6 +917,21 @@ zlfs_rename(void *v)
 	error = zlfs_dir_add(tdnp, tcnp->cn_nameptr, tcnp->cn_namelen,
 	    fnp->zn_ino, ftype);
 	KASSERT(error == 0);
+
+	/*
+	 * A directory moved to a new parent takes its ".." with it: repoint
+	 * it, and move the "child's .." link from the old parent to the new
+	 * one.  fnp was loaded up front, so the repoint cannot fail here.
+	 */
+	if (dirmove) {
+		(void)zlfs_dir_setdotdot(fnp, tdnp->zn_ino);
+		if (fdnp->zn_dinode.zi_nlink > 0)
+			fdnp->zn_dinode.zi_nlink--;
+		tdnp->zn_dinode.zi_nlink++;
+		zlfs_node_dirty(fdnp);
+		zlfs_node_dirty(tdnp);
+	}
+
 	fnp->zn_dinode.zi_ctime = gettime();
 	zlfs_node_dirty(fnp);
 
