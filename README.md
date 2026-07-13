@@ -9,8 +9,13 @@ host-managed SCSI ZBC / SMR disks and NVMe Zoned Namespaces, and building up to
 ZLFS -- a small log-structured filesystem that runs directly on those devices.
 
 This is research and bring-up work, not production-ready storage code.  ZLFS is
-a mountable read-write filesystem today, with the limitations listed under
-"ZLFS Status And Direction" below.
+a mountable read-write filesystem today -- files, directories, `rename`,
+garbage collection with a circular log, and crash-safe commits, all validated
+on a QEMU NVMe ZNS VM -- with the limitations listed under "ZLFS Status And
+Direction" below.  `functional_testing.md` tracks, per feature, what is
+VM-validated, what is pushed and awaiting evidence, and every defect each
+verification round caught.  The fork is periodically rebased onto the OpenBSD
+mainline (last: July 2026).
 
 ## Goals
 
@@ -39,10 +44,12 @@ Implemented prototype pieces:
 - initial NVMe ZNS reporting and zone management path
 - QEMU/OpenBSD VM validation workflow
 - experimental raw sequential write gate for one cached zone descriptor
-- ZLFS on-disk format v1 (`sys/sys/zlfs.h`): little-endian, CRC32C
+- ZLFS on-disk format v2 (`sys/sys/zlfs.h`): little-endian, CRC32C
   checksums, a ZNS-compatible superblock generation log ping-ponged
-  across zones 0-1 (no conventional zone required), plus checkpoint,
-  inode-map, inode, and fixed-size directory-entry structures
+  across zones 0-1 (no conventional zone required), a checkpoint that
+  carries a multi-block inode map (~256000 inodes at a 4 KB block),
+  inodes with direct plus single-indirect block pointers, and fixed-size
+  directory entries
 - ZLFS registered with the VFS (`option ZLFS`, `vfs_init.c` typenum 20,
   `MOUNT_ZLFS`), mountable read-write
 - `newfs_zlfs(8)` creates a real filesystem (superblock log, root
@@ -50,14 +57,21 @@ Implemented prototype pieces:
   dkzone ioctls and the validated raw sequential write path
 - `mount_zlfs(8)` to mount the filesystem
 - ZLFS read path (`sys/zlfs/`): superblock-log discovery, checkpoint and
-  inode-map load, a per-mount vnode cache, real `lookup`/`readdir`/`read`
-  over on-disk inodes, directories, and direct data blocks
+  inode-map load, a per-mount vnode cache, buffer-cache-backed
+  `lookup`/`readdir`/`read` over on-disk inodes, directories, and both
+  direct and indirect data blocks
 - ZLFS log-structured write path: an in-kernel raw zoned-write primitive
   (`dk_zone_write_kern` in `sd(4)`, a direct `WRITE(16)` that bypasses
-  the buffer cache and the host-managed write gate), an append-only log
-  allocator, and `create`/`write`/`fsync`/truncate with a commit that
-  flushes a fresh segment (data, inodes, inode map, checkpoint) and then
-  a generation N+1 superblock as the atomic commit point
+  the buffer cache and the host-managed write gate), a circular log
+  allocator, and the full namespace -- `create`/`write`/`fsync`/truncate,
+  `mkdir`/`rmdir`, `unlink`, and `rename` (including directories across
+  parents) -- with a commit that flushes a fresh segment (data, inodes,
+  inode map, checkpoint), issues a cache flush, and then appends a
+  generation N+1 superblock as the atomic, durable commit point
+- ZLFS garbage collection: a three-pass liveness scan (durable
+  checkpoint re-read from disk, in-core map, open vnodes) reclaims fully
+  dead zones with a zone reset, the superblock zones recycle by
+  ping-pong reset, and inode numbers of removed files are reused
 - minimal `ZBD` kernel config (`sys/arch/arm64/conf/ZBD`) covering only
   the QEMU virt machine for fast development rebuilds
 
@@ -113,6 +127,19 @@ Tested so far:
   exact contents.  This exercises the whole cycle: write, commit as a new
   segment, generation N+1 superblock append, remount, superblock-log
   discovery, checkpoint and inode-map load, and read-back.
+- The full namespace passed a six-part VM suite: files and subdirectories,
+  `mv` of files into subdirectories, directories across parents,
+  same-directory renames, rejection of a directory moved into its own
+  subtree, `rm`/`rmdir`, an indirect-block (>48 KB) file surviving
+  remount, and hierarchy persistence across remounts.
+- Garbage collection was validated by `zlfs-gc-churn.sh`: 150 zone-fills
+  on a 126-zone device completed with no `ENOSPC` -- impossible without
+  reclaim -- with `df` showing the cleaner reclaim ~6.6 GB in one pass
+  (98% -> 18%) and a keeper file bit-identical after the churn and after
+  a remount that finds the circular log head mid-device.
+- The v2 format was validated by `zlfs-manyfiles.sh`: 700 files (past
+  the old single-block 512-inode ceiling, spanning two inode-map
+  blocks) intact across a remount, and their removal persisted.
 - The next cross-transport milestone is to run the same `dkzone-vm-smoke.sh`
   flow against a SCSI ZBC or host-managed SMR target.  The
   `dkzone-scsi-zbc-smoke.sh` wrapper prints target evidence, refuses
