@@ -276,9 +276,15 @@ zlfs_clean(struct zlfs_mount *zmp)
 			return;
 	}
 
-	/* Reset any written-but-dead data zone (never the log head). */
+	/*
+	 * Reset any written-but-dead data zone.  The log head is spared
+	 * only while it still has room; an exhausted head (including the
+	 * placeholder used when mounting a full filesystem) protects
+	 * nothing and may itself be reclaimed.
+	 */
 	for (i = ZLFS_SB_ZONES; i < zmp->zm_nzones; i++) {
-		if (i == zmp->zm_log_zidx)
+		if (i == zmp->zm_log_zidx &&
+		    zmp->zm_log_lba < zmp->zm_log_zend)
 			continue;
 		zst = &zmp->zm_zones[i];
 		if (zst->zst_wp_lba == zst->zst_start_lba)
@@ -296,15 +302,15 @@ zlfs_clean(struct zlfs_mount *zmp)
 
 /*
  * Initialise the write-log heads from the loaded zone state.  The data
- * log appends to the highest already-written data zone (continuing from
- * its write pointer) or the first data zone if none has been written.
- * The superblock log appends to the active SB zone found by discovery.
+ * log continues at the head of the circular log -- the one written zone
+ * that still has room -- or starts at an empty data zone.  The
+ * superblock log appends to the active SB zone found by discovery.
  */
 int
 zlfs_log_init(struct zlfs_mount *zmp, const struct dk_zone *sbz)
 {
 	struct zlfs_zone_state *zst;
-	u_int64_t i;
+	u_int64_t i, bpb = zmp->zm_super.zs_block_size / zmp->zm_secsize;
 	int found = 0;
 
 	zmp->zm_sb_zstart[0] = sbz[0].dz_start_lba;
@@ -314,31 +320,56 @@ zlfs_log_init(struct zlfs_mount *zmp, const struct dk_zone *sbz)
 		return EINVAL;
 	zmp->zm_sb_lba = zmp->zm_zones[zmp->zm_sb_zidx].zst_wp_lba;
 
-	for (i = zmp->zm_nzones; i > ZLFS_SB_ZONES; i--) {
-		zst = &zmp->zm_zones[i - 1];
-		if (zst->zst_wp_lba <= zst->zst_start_lba)
-			continue;	/* zone never written */
-
-		if (zst->zst_wp_lba < zst->zst_start_lba + zst->zst_cap_lba) {
-			zmp->zm_log_zidx = i - 1;
-			zmp->zm_log_lba = zst->zst_wp_lba;
-		} else if (i < zmp->zm_nzones) {
-			zst = &zmp->zm_zones[i];
+	/*
+	 * Find the data-log head.  The log is circular, so after a wrap
+	 * the head is not the highest written zone: it is the single
+	 * written-but-not-full zone with room for at least one block
+	 * (unique while the zone capacity is a multiple of the block
+	 * size; zones with a smaller tail count as full and their space
+	 * comes back through the cleaner).
+	 */
+	for (i = ZLFS_SB_ZONES; i < zmp->zm_nzones; i++) {
+		zst = &zmp->zm_zones[i];
+		/*
+		 * The in-range bound also rejects degraded zones the
+		 * device reports with an invalid (all-ones) write pointer.
+		 */
+		if (zst->zst_wp_lba > zst->zst_start_lba &&
+		    zst->zst_wp_lba < zst->zst_start_lba + zst->zst_cap_lba &&
+		    zst->zst_start_lba + zst->zst_cap_lba -
+		    zst->zst_wp_lba >= bpb) {
 			zmp->zm_log_zidx = i;
-			zmp->zm_log_lba = zst->zst_start_lba;
-		} else {
-			return ENOSPC;
+			zmp->zm_log_lba = zst->zst_wp_lba;
+			found = 1;
+			break;
 		}
-		zmp->zm_log_zend = zmp->zm_zones[zmp->zm_log_zidx].zst_start_lba +
-		    zmp->zm_zones[zmp->zm_log_zidx].zst_cap_lba;
-		found = 1;
-		break;
 	}
 	if (!found) {
+		/* No partial head; start at the first empty data zone. */
+		for (i = ZLFS_SB_ZONES; i < zmp->zm_nzones; i++) {
+			zst = &zmp->zm_zones[i];
+			if (zst->zst_wp_lba == zst->zst_start_lba) {
+				zmp->zm_log_zidx = i;
+				zmp->zm_log_lba = zst->zst_start_lba;
+				found = 1;
+				break;
+			}
+		}
+	}
+	if (found) {
+		zst = &zmp->zm_zones[zmp->zm_log_zidx];
+		zmp->zm_log_zend = zst->zst_start_lba + zst->zst_cap_lba;
+	} else {
+		/*
+		 * Every data zone is written.  Mount anyway with an
+		 * exhausted head: the first commit runs the cleaner and
+		 * the allocator wraps into whatever it frees; until then
+		 * writes fail with ENOSPC.  Failing the mount here would
+		 * make a merely-full filesystem unmountable.
+		 */
 		zst = &zmp->zm_zones[ZLFS_SB_ZONES];
 		zmp->zm_log_zidx = ZLFS_SB_ZONES;
-		zmp->zm_log_lba = zst->zst_start_lba;
-		zmp->zm_log_zend = zst->zst_start_lba + zst->zst_cap_lba;
+		zmp->zm_log_lba = zmp->zm_log_zend = zst->zst_start_lba;
 	}
 
 	/*
