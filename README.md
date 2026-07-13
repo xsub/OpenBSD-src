@@ -348,10 +348,12 @@ On-disk format (`sys/sys/zlfs.h`):
   because NVMe ZNS namespaces have no conventional zones; the header
   documents append rules, mount discovery, the block-size bootstrap, and
   the both-zones-full crash recovery case.
-- The checkpoint locates a block-sized inode map (inode number to device
-  LBA) and the root inode.  Directories are arrays of fixed 128-byte
-  entries.  Inodes carry twelve direct block pointers plus a single
-  indirect block.
+- The checkpoint locates the inode map (inode number to device LBA) and
+  the root inode.  The map spans multiple blocks -- the checkpoint block
+  carries the array of map-block LBAs after its header, addressing about
+  256000 inodes at a 4 KB block size (format v2).  Directories are
+  arrays of fixed 128-byte entries.  Inodes carry twelve direct block
+  pointers plus a single indirect block.
 
 Userland:
 
@@ -415,15 +417,15 @@ Current limitations (documented in the code; each is a natural next step):
   live and superseded blocks are not compacted (a copying cleaner is
   future work), so space in mixed zones is reclaimed only once
   everything in them is superseded.
-- ZLFS blocks are read uncached (`B_INVAL`): raw zoned writes and zone
-  resets bypass the buffer cache, so caching would serve stale data once
-  a zone is recycled.  Proper buffer-cache integration is future work.
+- Reads go through the buffer cache.  This is coherent with the raw
+  zoned writes because the log never overwrites a live LBA; the cache
+  is purged whenever a zone reset makes cached blocks stale.
 - The commit path is not yet safe against concurrent vnode operations.
 
 Remaining sequence toward a general-purpose filesystem:
 
-1. Double/triple indirect blocks and block-level buffer-cache integration
-   (so files need not be buffered whole and reads cache safely).
+1. Double/triple indirect blocks and per-block dirty tracking (so files
+   need not be buffered whole in memory).
 2. A copying cleaner (compact mixed live/dead zones).
 3. Concurrency-safe commit.
 

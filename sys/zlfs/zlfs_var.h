@@ -47,7 +47,7 @@ struct zlfs_mount {
 	struct zlfs_zone_state *zm_zones;
 	u_int64_t	*zm_imap;	/* inode -> device LBA, or NULL */
 	u_int64_t	 zm_ninodes;	/* number of zm_imap entries */
-	u_int64_t	 zm_imap_lba;	/* LBA of the committed inode map */
+	size_t		 zm_imap_alloc;	/* bytes allocated for zm_imap */
 	int		 zm_rdonly;	/* mounted read-only */
 
 	/* Data-log head (append point for new data/metadata blocks). */
@@ -81,6 +81,11 @@ struct zlfs_node {
 /* Data-block pointers held in one single-indirect block. */
 #define ZLFS_NINDIR(zmp) \
 	((u_int64_t)(zmp)->zm_super.zs_block_size / sizeof(u_int64_t))
+
+/* Total inode numbers the multi-block map can address. */
+#define ZLFS_MAXINO(zmp) \
+	((u_int64_t)ZLFS_CKPT_NIMAP((zmp)->zm_super.zs_block_size) * \
+	    ((zmp)->zm_super.zs_block_size / sizeof(u_int64_t)))
 
 /*
  * Largest file the write path supports: the direct blocks plus one
@@ -118,6 +123,7 @@ int		zlfs_read_dinode(struct zlfs_mount *, u_int64_t,
 		    struct zlfs_inode *);
 int		zlfs_read_dinode_at(struct zlfs_mount *, u_int64_t,
 		    struct zlfs_inode *);
+void		zlfs_cache_purge_dev(struct zlfs_mount *);
 int		zlfs_bread_block(struct zlfs_mount *, u_int64_t, struct buf **);
 
 /* zlfs_alloc.c */

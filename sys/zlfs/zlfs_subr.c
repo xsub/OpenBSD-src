@@ -15,6 +15,7 @@
 #include <sys/systm.h>
 #include <sys/buf.h>
 #include <sys/endian.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/proc.h>
@@ -298,11 +299,11 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
  * Returns the buffer in *bpp on success; on error the buffer is
  * released and *bpp is NULL.
  *
- * The buffer is marked B_INVAL so brelse discards it instead of caching:
- * every ZLFS write and zone reset goes through raw device commands that
- * bypass the buffer cache, so once the cleaner recycles a zone a cached
- * buffer for a reused LBA would silently serve the old zone's contents.
- * Correctness over speed until ZLFS integrates with the buffer cache.
+ * Buffers are cached normally.  This is coherent even though ZLFS
+ * writes bypass the buffer cache, because the log never overwrites a
+ * live LBA: an LBA changes contents only when its zone is reset and
+ * later reused, and every reset is followed by zlfs_cache_purge_dev,
+ * which drops all cached device buffers.
  */
 int
 zlfs_bread_block(struct zlfs_mount *zmp, u_int64_t lba, struct buf **bpp)
@@ -317,9 +318,23 @@ zlfs_bread_block(struct zlfs_mount *zmp, u_int64_t lba, struct buf **bpp)
 		*bpp = NULL;
 		return error;
 	}
-	bp->b_flags |= B_INVAL;
 	*bpp = bp;
 	return 0;
+}
+
+/*
+ * Drop every cached buffer of the mount's device.  Required after any
+ * zone reset, before the zone's LBAs can be reused: the raw zoned
+ * writes bypass the buffer cache, so a stale cached block would
+ * otherwise keep serving the old zone's contents.  ZLFS never dirties
+ * device buffers, so nothing needs writing back.
+ */
+void
+zlfs_cache_purge_dev(struct zlfs_mount *zmp)
+{
+	vn_lock(zmp->zm_devvp, LK_EXCLUSIVE | LK_RETRY);
+	(void)vinvalbuf(zmp->zm_devvp, 0, NOCRED, curproc, 0, INFSLP);
+	VOP_UNLOCK(zmp->zm_devvp);
 }
 
 /* CRC32C over a block with the 8-byte checksum field at off taken as zero. */
@@ -349,11 +364,12 @@ zlfs_ckpt_load(struct zlfs_mount *zmp)
 {
 	struct buf *bp;
 	const struct zlfs_checkpoint *dc;
-	u_int64_t gen, root_ino, imap_lba, ninodes, i, maxino;
+	u_int64_t gen, root_ino, nblocks, ninodes, i, j, n, epb;
+	u_int64_t *lbas;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
 	int error;
 
-	maxino = bsize / sizeof(u_int64_t);
+	epb = bsize / sizeof(u_int64_t);	/* map entries per block */
 
 	error = zlfs_bread_block(zmp, zmp->zm_super.zs_checkpoint_lba, &bp);
 	if (error != 0)
@@ -373,33 +389,58 @@ zlfs_ckpt_load(struct zlfs_mount *zmp)
 
 	gen = letoh64(dc->zc_generation);
 	root_ino = letoh64(dc->zc_root_ino);
-	imap_lba = letoh64(dc->zc_imap_lba);
+	nblocks = letoh64(dc->zc_imap_nblocks);
 	ninodes = letoh64(dc->zc_ninodes);
-	brelse(bp);
 
 	if (gen != zmp->zm_super.zs_generation ||
 	    root_ino != zmp->zm_super.zs_root_ino ||
-	    ninodes <= ZLFS_ROOT_INO || ninodes > maxino) {
+	    nblocks == 0 || nblocks > ZLFS_CKPT_NIMAP(bsize) ||
+	    ninodes <= ZLFS_ROOT_INO || ninodes > nblocks * epb) {
+		brelse(bp);
 		return EINVAL;
 	}
 
-	error = zlfs_bread_block(zmp, imap_lba, &bp);
-	if (error != 0)
-		return error;
+	/* Copy the map-block LBA array out of the checkpoint block. */
+	lbas = mallocarray(nblocks, sizeof(u_int64_t), M_TEMP, M_WAITOK);
+	for (j = 0; j < nblocks; j++)
+		lbas[j] = letoh64(((const u_int64_t *)((const u_int8_t *)
+		    bp->b_data + sizeof(struct zlfs_checkpoint)))[j]);
+	brelse(bp);
+
+	/* Every map block that will be read must have a real LBA. */
+	for (j = 0; j < howmany(ninodes, epb); j++) {
+		if (lbas[j] == 0) {
+			free(lbas, M_TEMP, nblocks * sizeof(u_int64_t));
+			return EINVAL;
+		}
+	}
 
 	/*
-	 * The inode map is always allocated to the full one-block
-	 * capacity so a read-write mount can grow it in place when new
-	 * inodes are created; zm_ninodes tracks how many are valid.
+	 * The in-core map is allocated in whole blocks so a read-write
+	 * mount can grow it as inodes are created; zm_ninodes tracks how
+	 * many entries are valid.
 	 */
-	zmp->zm_imap = mallocarray(maxino, sizeof(u_int64_t), M_ZLFS,
-	    M_WAITOK | M_ZERO);
-	for (i = 0; i < ninodes; i++)
-		zmp->zm_imap[i] =
-		    letoh64(((u_int64_t *)bp->b_data)[i]);
+	zmp->zm_imap_alloc = nblocks * bsize;
+	zmp->zm_imap = malloc(zmp->zm_imap_alloc, M_ZLFS, M_WAITOK | M_ZERO);
+	for (j = 0; j < nblocks; j++) {
+		error = zlfs_bread_block(zmp, lbas[j], &bp);
+		if (error != 0) {
+			free(lbas, M_TEMP, nblocks * sizeof(u_int64_t));
+			free(zmp->zm_imap, M_ZLFS, zmp->zm_imap_alloc);
+			zmp->zm_imap = NULL;
+			zmp->zm_imap_alloc = 0;
+			return error;
+		}
+		n = MIN(epb, ninodes - j * epb);
+		for (i = 0; i < n; i++)
+			zmp->zm_imap[j * epb + i] =
+			    letoh64(((u_int64_t *)bp->b_data)[i]);
+		brelse(bp);
+		if ((j + 1) * epb >= ninodes)
+			break;
+	}
+	free(lbas, M_TEMP, nblocks * sizeof(u_int64_t));
 	zmp->zm_ninodes = ninodes;
-	zmp->zm_imap_lba = imap_lba;
-	brelse(bp);
 
 	return 0;
 }

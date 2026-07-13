@@ -231,8 +231,7 @@ out:
 
 	if (zmp != NULL) {
 		if (zmp->zm_imap != NULL)
-			free(zmp->zm_imap, M_ZLFS,
-			    zmp->zm_super.zs_block_size);
+			free(zmp->zm_imap, M_ZLFS, zmp->zm_imap_alloc);
 		zlfs_zones_free(zmp);
 		free(zmp, M_ZLFS, sizeof(*zmp));
 		mp->mnt_data = NULL;
@@ -273,7 +272,7 @@ zlfs_unmount(struct mount *mp, int mntflags, struct proc *p)
 	vput(zmp->zm_devvp);
 
 	if (zmp->zm_imap != NULL)
-		free(zmp->zm_imap, M_ZLFS, zmp->zm_super.zs_block_size);
+		free(zmp->zm_imap, M_ZLFS, zmp->zm_imap_alloc);
 	zlfs_zones_free(zmp);
 	free(zmp, M_ZLFS, sizeof(*zmp));
 	mp->mnt_data = NULL;
@@ -433,6 +432,30 @@ loop:
 }
 
 /*
+ * Grow the in-core inode map (in whole blocks) so entry ino exists.
+ * Called with zm_lock held.
+ */
+static int
+zlfs_imap_grow(struct zlfs_mount *zmp, u_int64_t ino)
+{
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	u_int64_t *nmap;
+	size_t need;
+
+	need = roundup((ino + 1) * sizeof(u_int64_t), bsize);
+	if (need <= zmp->zm_imap_alloc)
+		return 0;
+	if (ino >= ZLFS_MAXINO(zmp))
+		return ENOSPC;
+	nmap = malloc(need, M_ZLFS, M_WAITOK | M_ZERO);
+	memcpy(nmap, zmp->zm_imap, zmp->zm_imap_alloc);
+	free(zmp->zm_imap, M_ZLFS, zmp->zm_imap_alloc);
+	zmp->zm_imap = nmap;
+	zmp->zm_imap_alloc = need;
+	return 0;
+}
+
+/*
  * Allocate a brand-new inode and return its locked vnode.  The inode
  * exists only in core (dirty, empty data, no on-disk map entry) until
  * the next commit.  Serialised by the parent directory lock held by the
@@ -449,7 +472,7 @@ zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 	*vpp = NULL;
 	if (zmp->zm_rdonly)
 		return EROFS;
-	maxino = zmp->zm_super.zs_block_size / sizeof(u_int64_t);
+	maxino = ZLFS_MAXINO(zmp);
 
 	error = getnewvnode(VT_ZLFS, zmp->zm_mountp, &zlfs_vops, &vp);
 	if (error != 0)
@@ -484,12 +507,16 @@ zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 	 * and not owned by any in-core inode.  The in-core check matters
 	 * twice over -- a freshly created inode has no map entry until it
 	 * commits, and an unlinked-but-open one has lost its map entry but
-	 * still lives.  Numbers of removed files are reused, so churning
-	 * workloads do not exhaust the map (one block, 512 entries).
+	 * still lives.  Numbers of removed files are reused; every number
+	 * up to zm_ninodes is in use when the scan passes it, and the
+	 * first number beyond zm_ninodes is always free (no in-core inode
+	 * can hold one, since claiming bumps zm_ninodes).
 	 */
 	rw_enter_write(&zmp->zm_lock);
 	for (ino = ZLFS_FIRST_INO; ino < maxino; ino++) {
-		if (ino < zmp->zm_ninodes && zmp->zm_imap[ino] != 0)
+		if (ino >= zmp->zm_ninodes)
+			break;		/* first never-used number */
+		if (zmp->zm_imap[ino] != 0)
 			continue;
 		LIST_FOREACH(lnp, &zmp->zm_nodes, zn_entry) {
 			if (lnp->zn_ino == ino)
@@ -498,7 +525,8 @@ zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 		if (lnp == NULL)
 			break;
 	}
-	if (ino >= maxino) {
+	if (ino >= maxino ||
+	    (error = zlfs_imap_grow(zmp, ino)) != 0) {
 		rw_exit_write(&zmp->zm_lock);
 		/* Dispose through the usual dead-inode path. */
 		znp->zn_dinode.zi_nlink = 0;

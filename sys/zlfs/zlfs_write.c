@@ -186,7 +186,7 @@ zlfs_commit_node(struct zlfs_mount *zmp, struct zlfs_node *znp)
 {
 	struct zlfs_inode *zi = &znp->zn_dinode;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
-	u_int64_t maxino = bsize / sizeof(u_int64_t);
+	u_int64_t maxino = ZLFS_MAXINO(zmp);
 	u_int8_t *blk;
 	u_int64_t off, blkno, lba;
 	size_t n;
@@ -321,6 +321,8 @@ zlfs_commit_super(struct zlfs_mount *zmp, u_int8_t *blk, u_int64_t generation,
 				return error;
 			zmp->zm_zones[other].zst_wp_lba =
 			    zmp->zm_zones[other].zst_start_lba;
+			/* Cached blocks of the reset zone are now stale. */
+			zlfs_cache_purge_dev(zmp);
 		}
 		zmp->zm_sb_zidx = other;
 		zmp->zm_sb_lba = zmp->zm_sb_zstart[other];
@@ -373,7 +375,8 @@ zlfs_commit(struct zlfs_mount *zmp)
 	struct zlfs_node *znp;
 	struct zlfs_checkpoint *zc;
 	u_int32_t bsize = zmp->zm_super.zs_block_size, crc;
-	u_int64_t imap_lba, ckpt_lba, newgen, i;
+	u_int64_t imap_lba, ckpt_lba, newgen, i, j, n, epb, nblocks, ninodes;
+	u_int64_t *imap_lbas = NULL;
 	u_int8_t *blk = NULL;
 	int error = 0, ndirty = 0;
 
@@ -403,8 +406,11 @@ zlfs_commit(struct zlfs_mount *zmp)
 	{
 		u_int64_t bpb = bsize / zmp->zm_secsize;
 		u_int64_t bpz = zmp->zm_super.zs_zone_cap_lba / bpb;
-		u_int64_t need = 2, headfree, freez;
+		u_int64_t need, headfree, freez;
 
+		/* Checkpoint plus however many inode-map blocks. */
+		need = 1 + howmany(zmp->zm_ninodes,
+		    bsize / sizeof(u_int64_t));
 		LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
 			if (znp->zn_dirty)
 				need += howmany(znp->zn_datalen, bsize) + 2;
@@ -425,17 +431,38 @@ zlfs_commit(struct zlfs_mount *zmp)
 	}
 
 	blk = malloc(bsize, M_ZLFS, M_WAITOK | M_ZERO);
+	imap_lbas = malloc(bsize - sizeof(struct zlfs_checkpoint), M_ZLFS,
+	    M_WAITOK | M_ZERO);
 
-	/* 2. New inode map. */
-	error = zlfs_alloc_block(zmp, &imap_lba);
-	if (error != 0)
+	/*
+	 * 2. New inode map (one block per epb entries).  Snapshot
+	 * zm_ninodes once: the block count, the entries written, and the
+	 * checkpoint's zc_ninodes below must all agree, and a create
+	 * running between the reads could otherwise leave the durable
+	 * checkpoint claiming more entries than its map blocks hold --
+	 * which a later mount rejects.
+	 */
+	epb = bsize / sizeof(u_int64_t);
+	ninodes = zmp->zm_ninodes;
+	nblocks = howmany(ninodes, epb);
+	if (nblocks > ZLFS_CKPT_NIMAP(bsize)) {
+		error = EFBIG;
 		goto out_blk;
-	memset(blk, 0, bsize);
-	for (i = 0; i < zmp->zm_ninodes; i++)
-		((u_int64_t *)blk)[i] = htole64(zmp->zm_imap[i]);
-	error = zlfs_write_block(zmp, imap_lba, blk);
-	if (error != 0)
-		goto out_blk;
+	}
+	for (j = 0; j < nblocks; j++) {
+		error = zlfs_alloc_block(zmp, &imap_lba);
+		if (error != 0)
+			goto out_blk;
+		memset(blk, 0, bsize);
+		n = MIN(epb, ninodes - j * epb);
+		for (i = 0; i < n; i++)
+			((u_int64_t *)blk)[i] =
+			    htole64(zmp->zm_imap[j * epb + i]);
+		error = zlfs_write_block(zmp, imap_lba, blk);
+		if (error != 0)
+			goto out_blk;
+		imap_lbas[j] = imap_lba;
+	}
 
 	/* 3. New checkpoint (generation N+1). */
 	error = zlfs_alloc_block(zmp, &ckpt_lba);
@@ -448,9 +475,13 @@ zlfs_commit(struct zlfs_mount *zmp)
 	zc->zc_version = htole32(ZLFS_VERSION);
 	zc->zc_generation = htole64(newgen);
 	zc->zc_root_ino = htole64(zmp->zm_super.zs_root_ino);
-	zc->zc_imap_lba = htole64(imap_lba);
-	zc->zc_ninodes = htole64(zmp->zm_ninodes);
+	zc->zc_imap_nblocks = htole64(nblocks);
+	zc->zc_ninodes = htole64(ninodes);
 	memcpy(zc->zc_uuid, zmp->zm_super.zs_uuid, sizeof(zc->zc_uuid));
+	/* The map-block LBA array lives right after the header. */
+	for (j = 0; j < nblocks; j++)
+		((u_int64_t *)(blk + sizeof(struct zlfs_checkpoint)))[j] =
+		    htole64(imap_lbas[j]);
 	crc = ZLFS_CRC32C_FINAL(zlfs_crc32c_update(ZLFS_CRC32C_INITIAL,
 	    blk, bsize));
 	zc->zc_checksum = htole64(crc);
@@ -476,11 +507,11 @@ zlfs_commit(struct zlfs_mount *zmp)
 	 */
 	zmp->zm_super.zs_generation = newgen;
 	zmp->zm_super.zs_checkpoint_lba = ckpt_lba;
-	zmp->zm_imap_lba = imap_lba;
 	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry)
 		znp->zn_dirty = 0;
 
 out_blk:
+	free(imap_lbas, M_ZLFS, bsize - sizeof(struct zlfs_checkpoint));
 	free(blk, M_ZLFS, bsize);
 out:
 	rw_exit_write(&zmp->zm_wlock);

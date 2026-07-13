@@ -226,36 +226,67 @@ zlfs_clean(struct zlfs_mount *zmp)
 	struct zlfs_zone_state *zst;
 	struct zlfs_node *znp;
 	struct buf *bp;
-	u_int64_t *dimap;
+	const struct zlfs_checkpoint *dc;
+	u_int64_t *dimap, *lbas;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
-	u_int64_t i, ino, lba, maxino = bsize / sizeof(u_int64_t);
-	int error;
+	u_int64_t i, j, ino, lba, nblocks, epb = bsize / sizeof(u_int64_t);
+	int error, nreset = 0;
 
 	for (i = 0; i < zmp->zm_nzones; i++)
 		zmp->zm_zones[i].zst_live_bytes = 0;
 
-	/* Metadata roots of the durable checkpoint. */
+	/* Metadata root: the durable checkpoint block. */
 	zlfs_gc_mark(zmp, zmp->zm_super.zs_checkpoint_lba);
-	zlfs_gc_mark(zmp, zmp->zm_imap_lba);
 
-	/* Pass 1: the durable live set, from the on-disk inode map. */
-	if (zmp->zm_imap_lba != 0) {
-		if (zlfs_bread_block(zmp, zmp->zm_imap_lba, &bp) != 0)
+	/*
+	 * Pass 1: the durable live set.  Re-read the checkpoint block to
+	 * find the inode-map blocks it references, mark them, and walk
+	 * every inode they name.
+	 */
+	if (zmp->zm_super.zs_checkpoint_lba != 0) {
+		if (zlfs_bread_block(zmp, zmp->zm_super.zs_checkpoint_lba,
+		    &bp) != 0)
 			return;
-		dimap = malloc(bsize, M_TEMP, M_WAITOK);
-		memcpy(dimap, bp->b_data, bsize);
+		dc = (const struct zlfs_checkpoint *)bp->b_data;
+		nblocks = letoh64(dc->zc_imap_nblocks);
+		if (nblocks == 0 || nblocks > ZLFS_CKPT_NIMAP(bsize)) {
+			brelse(bp);
+			return;		/* unusable map; reclaim nothing */
+		}
+		lbas = mallocarray(nblocks, sizeof(u_int64_t), M_TEMP,
+		    M_WAITOK);
+		for (j = 0; j < nblocks; j++)
+			lbas[j] = letoh64(((const u_int64_t *)
+			    ((const u_int8_t *)bp->b_data +
+			    sizeof(struct zlfs_checkpoint)))[j]);
 		brelse(bp);
-		for (ino = 0; ino < maxino; ino++) {
-			lba = letoh64(dimap[ino]);
-			if (lba == 0)
+
+		dimap = malloc(bsize, M_TEMP, M_WAITOK);
+		for (j = 0; j < nblocks; j++) {
+			if (lbas[j] == 0)
 				continue;
-			if (zlfs_gc_mark_inode(zmp, lba) != 0) {
-				free(dimap, M_TEMP, bsize);
-				return;
+			zlfs_gc_mark(zmp, lbas[j]);
+			if (zlfs_bread_block(zmp, lbas[j], &bp) != 0)
+				goto pass1_fail;
+			memcpy(dimap, bp->b_data, bsize);
+			brelse(bp);
+			for (ino = 0; ino < epb; ino++) {
+				lba = letoh64(dimap[ino]);
+				if (lba == 0)
+					continue;
+				if (zlfs_gc_mark_inode(zmp, lba) != 0)
+					goto pass1_fail;
 			}
 		}
 		free(dimap, M_TEMP, bsize);
+		free(lbas, M_TEMP, nblocks * sizeof(u_int64_t));
+		goto pass1_done;
+pass1_fail:
+		free(dimap, M_TEMP, bsize);
+		free(lbas, M_TEMP, nblocks * sizeof(u_int64_t));
+		return;
 	}
+pass1_done:
 
 	/* Pass 2: the in-core live set, through zm_imap. */
 	for (ino = 0; ino < zmp->zm_ninodes; ino++) {
@@ -297,7 +328,16 @@ zlfs_clean(struct zlfs_mount *zmp)
 			continue;		/* best effort */
 		zst->zst_wp_lba = zst->zst_start_lba;
 		zst->zst_cond = DK_ZONE_COND_EMPTY;
+		nreset++;
 	}
+
+	/*
+	 * Cached buffers for the reset zones would serve stale contents
+	 * once their LBAs are reused; drop the device's cache before the
+	 * allocator can hand them out again.
+	 */
+	if (nreset > 0)
+		zlfs_cache_purge_dev(zmp);
 }
 
 /*
@@ -378,7 +418,8 @@ zlfs_log_init(struct zlfs_mount *zmp, const struct dk_zone *sbz)
 	 * an empty full-block map with only the reserved inodes.
 	 */
 	if (zmp->zm_imap == NULL) {
-		zmp->zm_imap = malloc(zmp->zm_super.zs_block_size, M_ZLFS,
+		zmp->zm_imap_alloc = zmp->zm_super.zs_block_size;
+		zmp->zm_imap = malloc(zmp->zm_imap_alloc, M_ZLFS,
 		    M_WAITOK | M_ZERO);
 		zmp->zm_ninodes = ZLFS_FIRST_INO;
 	}
