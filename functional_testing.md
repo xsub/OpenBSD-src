@@ -28,14 +28,14 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 | `rename`: files, same-dir, into subdir, overwrite; exact 4-vnode disposal | `58cd1c130b5` | same run: `mv` file into subdir, source gone, same-dir rename ok |
 | `rename`: directory across parents (`..` reparent, subtree-cycle rejection, nlink transfer) | `6fc9812d141` | same run: `mv d e/` works, cycle move rejected, persists across remount |
 | Circular allocator + uncached (`B_INVAL`) reads — non-wrap operation | `16103441ec6` | ZBD#11, 2026-07-12: churn v1 (300 x 2 MB write/rm) — no regression, keeper file cksum-intact after churn and remount |
+| Data-zone garbage collection + log wrap-around, END TO END | `16103441ec6` | ZBD#13, 2026-07-13: churn v2 full PASS — 150/150 zone-fills on a 126-zone device, no ENOSPC; df sawtooth 48/65/81/**98% @ i100** then **18% @ i125** (~6.6 GB reclaimed in one cleaner pass); keeper cksum intact after churn AND after remount |
+| Inode-number reuse in `zlfs_ialloc` | `07d27328072` | same run: 4800 creates against the 512-entry map (32 live at a time), sailed past the old ~i16 exhaustion point |
+| Wrap-aware `zlfs_log_init` (circular head discovery; full fs still mounts) | `2570934d9db` | same run: the final remount found the mid-device head after a full wrap — previously ENOSPC (see §6) |
 
 ## 2. In testing — pushed, awaiting VM evidence
 
 | Feature | Commit | Verified so far | Missing evidence |
 |---|---|---|---|
-| Data-zone garbage collection + log wrap-around — RUNTIME VALIDATED | `16103441ec6` | churn v2 rerun (2026-07-13): 150/150 iterations, no ENOSPC; df sawtooth proves the cleaner — 60% @ i50, 76% @ i75, 93% @ i100, then **14% @ i125** (~6.5 GB reclaimed in one pass); keeper cksum intact after churn.  Earlier: churn v1 too small (~10/126 zones, see §6); churn v2 run #1 hit inode exhaustion at ~i16 (see §6) | remount-after-wrap failed (`zlfs_log_init` ENOSPC, see §6) — rerun after the wrap-aware log-head fix: the final `keeper intact after remount` check must pass |
-| Inode-number reuse in `zlfs_ialloc` (lowest free: absent from map and from in-core list) | `07d27328072` | adversarial round: pass; churn v2 rerun passed iteration 16 and completed 4800 creates against the 512-entry map | covered by the same rerun; move to §1 with the GC row once remount passes |
-| Wrap-aware `zlfs_log_init` (find the circular head; mount even when full) | pending push | found by churn v2 rerun: old code scanned down from the top and returned ENOSPC when the highest data zone was full — after a wrap the head sits mid-device | adversarial round, then rerun churn v2 end-to-end (kernel rebuild) |
 | SB-zone recycling (reset stale SB zone on ping-pong) | `422cb631771` | 2 adversarial rounds (caught FWRITE and wp-tracking bugs, then pass) | never exercised on VM: one SB zone holds 16384 superblocks (131072 LBAs / 8 per SB), so the first ping-pong needs ~16k commits; churn v2 produces ~300 — a dedicated many-commit test or a smaller-zone QEMU profile is needed |
 
 ## 3. Under analysis / known gaps
