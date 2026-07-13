@@ -453,17 +453,20 @@ write_filesystem(int fd, const char *path, const struct zone_geometry *g,
 	    sizeof(imap_ent));
 	write_block(fd, path, lba[ZLFS_MKFS_IMAP], secsize, blk, block_size);
 
-	/* Block 6: checkpoint. */
+	/* Block 6: checkpoint (one-block inode map; LBA follows header). */
 	memset(blk, 0, block_size);
 	memset(&zc, 0, sizeof(zc));
 	zc.zc_magic = htole32(ZLFS_MAGIC);
 	zc.zc_version = htole32(ZLFS_VERSION);
 	zc.zc_generation = htole64(0);
 	zc.zc_root_ino = htole64(ZLFS_ROOT_INO);
-	zc.zc_imap_lba = htole64(lba[ZLFS_MKFS_IMAP]);
+	zc.zc_imap_nblocks = htole64(1);
 	zc.zc_ninodes = htole64(ZLFS_FIRST_INO + 1);
 	memcpy(zc.zc_uuid, uuid, sizeof(zc.zc_uuid));
 	memcpy(blk, &zc, sizeof(zc));
+	imap_ent = htole64(lba[ZLFS_MKFS_IMAP]);
+	memcpy(blk + sizeof(struct zlfs_checkpoint), &imap_ent,
+	    sizeof(imap_ent));
 	crc = crc32c(blk, block_size);
 	((struct zlfs_checkpoint *)blk)->zc_checksum = htole64(crc);
 	write_block(fd, path, lba[ZLFS_MKFS_CKPT], secsize, blk, block_size);

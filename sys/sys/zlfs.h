@@ -51,7 +51,7 @@
 #include <sys/types.h>
 
 #define ZLFS_MAGIC	0x54BDCC01	/* "ZLFS" NEW */
-#define ZLFS_VERSION	1
+#define ZLFS_VERSION	2	/* 2: multi-block inode map */
 
 /* Zones reserved at the start of the device for the superblock log. */
 #define ZLFS_SB_ZONES	2
@@ -181,22 +181,31 @@ struct zlfs_dirent {
 /*
  * Checkpoint: the filesystem's mount entry point.  zs_checkpoint_lba
  * in the superblock points at the newest checkpoint block.  The
- * checkpoint locates the inode map -- a block-sized little-endian
- * array of u_int64_t device LBAs indexed by inode number, where
- * imap[ino] == 0 means the inode does not exist -- and names the root
- * inode.  zc_checksum is CRC32C over the whole zs_block_size-sized
- * block with zc_checksum taken as zero.
+ * checkpoint locates the inode map -- a little-endian array of
+ * u_int64_t device LBAs indexed by inode number, where imap[ino] == 0
+ * means the inode does not exist -- and names the root inode.
+ *
+ * The map spans zc_imap_nblocks block-sized extents; their device LBAs
+ * are a little-endian u_int64_t array that starts immediately after
+ * this header inside the checkpoint block, so a checkpoint addresses
+ * up to ZLFS_CKPT_NIMAP(bsize) map blocks (about 500 at a 4096-byte
+ * block, or ~256000 inodes).  zc_checksum is CRC32C over the whole
+ * zs_block_size-sized block with zc_checksum taken as zero.
  */
 struct zlfs_checkpoint {
 	u_int32_t	zc_magic;	/* ZLFS_MAGIC */
 	u_int32_t	zc_version;	/* ZLFS_VERSION */
 	u_int64_t	zc_generation;	/* matches the superblock generation */
 	u_int64_t	zc_root_ino;
-	u_int64_t	zc_imap_lba;	/* device LBA of the inode-map block */
+	u_int64_t	zc_imap_nblocks; /* inode-map blocks; LBAs follow */
 	u_int64_t	zc_ninodes;	/* number of inode-map entries */
 	u_int8_t	zc_uuid[16];	/* must match the superblock UUID */
 	u_int64_t	zc_reserved[4];
 	u_int64_t	zc_checksum;
 };
+
+/* Inode-map block LBAs storable in one checkpoint block. */
+#define ZLFS_CKPT_NIMAP(bsize) \
+	(((bsize) - sizeof(struct zlfs_checkpoint)) / sizeof(u_int64_t))
 
 #endif /* _SYS_ZLFS_H_ */

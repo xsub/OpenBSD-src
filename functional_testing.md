@@ -36,6 +36,8 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 
 | Feature | Commit | Verified so far | Missing evidence |
 |---|---|---|---|
+| Multi-block inode map (format v2: checkpoint carries the map-block LBA array; ~256k inodes at 4k; in-core map grows on demand) | pending push | adversarial round in progress | `zlfs-manyfiles.sh sd1c` (700 files > old 512 ceiling, remount, count + sampled contents); needs kernel rebuild AND `newfs_zlfs` reinstall (v2), plus reformat — v1 images are rejected |
+| Read caching restored (no more blanket `B_INVAL`; cache purged via `vinvalbuf` after any zone reset) | pending push | adversarial round in progress | churn v2 rerun must still PASS (the reset-purge path is exercised by the cleaner run at ~i120 and the remount) |
 | SB-zone recycling (reset stale SB zone on ping-pong) | `422cb631771` | 2 adversarial rounds (caught FWRITE and wp-tracking bugs, then pass) | never exercised on VM: one SB zone holds 16384 superblocks (131072 LBAs / 8 per SB), so the first ping-pong needs ~16k commits; churn v2 produces ~300 — a dedicated many-commit test or a smaller-zone QEMU profile is needed |
 
 ## 3. Under analysis / known gaps
@@ -46,7 +48,8 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 | Corrupt-metadata hardening | a self-referential indirect entry (entry LBA == `zi_ib[0]`) would sleep forever in `getblk` (B_BUSY held by caller) | unreachable with well-formed metadata (allocator hands out distinct LBAs) | add bounds/identity checks on indirect entries when fsck-style validation is designed |
 | `statfs` free-space approximation | `f_bfree` counts EMPTY-condition zones only; mixed zones count as used; live_bytes is a zero/nonzero flag, inflated by duplicate marking | cosmetic accounting | proper per-zone byte accounting with the copying cleaner |
 | `zst_live_bytes` semantics | only tested against 0 in the reset loop; not a true byte count | none today; trap for future code | rename or fix when the copying cleaner needs real counts |
-| Inode map is a single block | hard cap of 512 inode numbers (510 usable files/dirs alive at once); numbers are now reused after removal, but the live-count ceiling stands | churning workloads fine; wide trees will hit ENOSPC at 510 live inodes | multi-block inode map (format change) |
+| Inode ceiling (was: single-block map, 512) | format v2 raises the cap to `ZLFS_CKPT_NIMAP * epb` (~256000 at a 4 KB block: ~500 map-block LBAs fit in the checkpoint block) | wide trees fine now; the ~256k cap is structural until the map gets its own indirection | none planned; revisit only if a workload needs more |
+| `zlfs_imap_grow` swaps `zm_imap` under `zm_lock` only | readers (`read_dinode`, commit, cleaner pass 2, remove/rmdir/rename) index the map without `zm_lock`; safe today because all accesses are single-expression under the kernel lock and grow has no sleep between copy and install — a latent use-after-free the moment these paths run MP-unlocked | none under the current single-threaded assumption | take `zm_lock` (or `zm_wlock`) in map readers as part of the concurrency-safe-commit phase |
 
 ## 4. Later (roadmap order)
 
