@@ -116,6 +116,10 @@ int	sd_zoned_buf_lba(struct sd_softc *, struct buf *, u_int64_t *,
 	    u_int64_t *);
 int	sd_zoned_write_prepare(struct sd_softc *, struct buf *);
 void	sd_zoned_write_done(struct sd_softc *, struct buf *);
+void	sd_zoned_cache_update(struct sd_softc *, const struct dk_zone *);
+void	sd_zoned_cache_invalidate(struct sd_softc *);
+int	sd_zoned_cache_busy(struct sd_softc *);
+void	sd_zoned_zonecmd_done(struct sd_softc *);
 
 int	sd_cmd_rw6(struct scsi_generic *, int, u_int64_t, u_int32_t);
 int	sd_cmd_rw10(struct scsi_generic *, int, u_int64_t, u_int32_t);
@@ -1608,6 +1612,10 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 	if (ISSET(sc->flags, SDF_DYING))
 		return ENXIO;
 	link = sc->sc_link;
+
+	if (sd_zoned_cache_busy(sc))
+		return EBUSY;
+
 	error = scsi_do_ioctl(link, DIOCGZONEREPORT, (caddr_t)dzr, 0);
 	if (error != ENOTTY) {
 		/*
@@ -1619,13 +1627,10 @@ sd_ioctl_zonereport(struct sd_softc *sc, struct dk_zone_report *dzr)
 		 * the device's own write-pointer enforcement remains
 		 * authoritative.
 		 */
-		if (error == 0 && dzr->dzr_entries_filled > 0) {
-			if (copyin(&dzr->dzr_zones[0], &zone,
-			    sizeof(zone)) == 0)
-				sd_zoned_cache_update(sc, &zone);
-			else
-				sd_zoned_cache_invalidate(sc);
-		}
+		sd_zoned_cache_invalidate(sc);
+		if (error == 0 && dzr->dzr_entries_filled > 0 &&
+		    copyin(&dzr->dzr_zones[0], &zone, sizeof(zone)) == 0)
+			sd_zoned_cache_update(sc, &zone);
 		return error;
 	}
 
