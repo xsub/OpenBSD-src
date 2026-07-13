@@ -1280,7 +1280,7 @@ nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
 					*zns = ns->zns;
 	struct nvm_zns_zone_report	*hdr;
 	struct nvm_zns_zone_desc		*desc;
-	struct dk_zone			 cache_zone, zone;
+	struct dk_zone			 zone;
 	u_int64_t			 nzones;
 	u_int64_t			 zone_size_lba;
 	u_int32_t			 buflen, entries, entries_available;
@@ -1288,7 +1288,7 @@ nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
 	u_int				 flbas;
 	u_int8_t			 zras;
 	void				*buf;
-	int				 cache_zone_valid = 0, error;
+	int				 error;
 
 	if (ident == NULL || zns == NULL)
 		return EOPNOTSUPP;
@@ -1296,13 +1296,6 @@ nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
 		return EINVAL;
 	if (dzr->dzr_entries > 0 && dzr->dzr_zones == NULL)
 		return EINVAL;
-
-	if (link->device_softc != NULL) {
-		if (sd_zoned_cache_busy((struct sd_softc *)link->device_softc))
-			return EBUSY;
-		sd_zoned_cache_invalidate(
-		    (struct sd_softc *)link->device_softc);
-	}
 
 	error = nvme_zns_report_option(dzr->dzr_report_option, &zras);
 	if (error != 0)
@@ -1346,14 +1339,7 @@ nvme_zns_ioctl_zonereport(struct nvme_softc *sc, struct scsi_link *link,
 		error = copyout(&zone, &dzr->dzr_zones[i], sizeof(zone));
 		if (error != 0)
 			break;
-		if (i == 0) {
-			cache_zone = zone;
-			cache_zone_valid = 1;
-		}
 	}
-	if (error == 0 && cache_zone_valid && link->device_softc != NULL)
-		sd_zoned_cache_update((struct sd_softc *)link->device_softc,
-		    &cache_zone);
 
 done:
 	dma_free(buf, buflen);
