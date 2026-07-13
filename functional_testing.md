@@ -32,12 +32,13 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 | Inode-number reuse in `zlfs_ialloc` | `07d27328072` | same run: 4800 creates against the 512-entry map (32 live at a time), sailed past the old ~i16 exhaustion point |
 | Wrap-aware `zlfs_log_init` (circular head discovery; full fs still mounts) | `2570934d9db` | same run: the final remount found the mid-device head after a full wrap — previously ENOSPC (see §6) |
 
+| Multi-block inode map (format v2: checkpoint carries the map-block LBA array; ~256k inodes at 4 KB; in-core map grows on demand) | `b9f24f306af` (rebased: `df898e2bf1b`) | 2026-07-13: `zlfs-manyfiles.sh` PASS — 700 files (> old 512 ceiling = 2 map blocks, exercising `zlfs_imap_grow` and the multi-block commit/load round trip), population + sampled contents intact after remount, removal persisted |
+| Read caching restored (`B_INVAL` gone; `vinvalbuf` purge after any zone reset) | `b9f24f306af` (rebased: `df898e2bf1b`) | 2026-07-13: churn v2 PASS on the v2 kernel — cleaner fired ~i90 (df 86% -> **7%**, deepest trough yet, exercising the reset-purge), 150/150 no ENOSPC, keeper intact after churn and after a remount served through the cache |
+
 ## 2. In testing — pushed, awaiting VM evidence
 
 | Feature | Commit | Verified so far | Missing evidence |
 |---|---|---|---|
-| Multi-block inode map (format v2: checkpoint carries the map-block LBA array; ~256k inodes at 4k; in-core map grows on demand) | pending push | adversarial round in progress | `zlfs-manyfiles.sh sd1c` (700 files > old 512 ceiling, remount, count + sampled contents); needs kernel rebuild AND `newfs_zlfs` reinstall (v2), plus reformat — v1 images are rejected |
-| Read caching restored (no more blanket `B_INVAL`; cache purged via `vinvalbuf` after any zone reset) | pending push | adversarial round in progress | churn v2 rerun must still PASS (the reset-purge path is exercised by the cleaner run at ~i120 and the remount) |
 | SB-zone recycling (reset stale SB zone on ping-pong) | `422cb631771` | 2 adversarial rounds (caught FWRITE and wp-tracking bugs, then pass) | never exercised on VM: one SB zone holds 16384 superblocks (131072 LBAs / 8 per SB), so the first ping-pong needs ~16k commits; churn v2 produces ~300 — a dedicated many-commit test or a smaller-zone QEMU profile is needed |
 
 ## 3. Under analysis / known gaps
