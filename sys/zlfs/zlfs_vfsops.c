@@ -208,6 +208,26 @@ zlfs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p,
 	if (error != 0)
 		goto out;
 
+	/*
+	 * Test hook: clamp the superblock-zone capacity so the zone
+	 * ping-pong recycles after za_sb_cap commits instead of ~16k,
+	 * making the recycle path exercisable by a regress script.
+	 * Only ever shrinks; harmless for correctness -- the switch just
+	 * happens earlier and the full zone is still reset.  Fresh
+	 * mounts only: the MNT_UPDATE path returns before reaching here,
+	 * so changing the clamp requires a umount + mount.
+	 */
+	if (args->za_sb_cap > 0) {
+		u_int64_t cap = (u_int64_t)args->za_sb_cap *
+		    (zmp->zm_super.zs_block_size / zmp->zm_secsize);
+
+		if (cap < zmp->zm_sb_zcap) {
+			zmp->zm_sb_zcap = cap;
+			printf("zlfs: TEST superblock zones clamped to %d "
+			    "superblocks\n", args->za_sb_cap);
+		}
+	}
+
 	zmp->zm_mountp = mp;
 	zmp->zm_ctime = gettime();
 
@@ -298,6 +318,7 @@ zlfs_statfs(struct mount *mp, struct statfs *sbp, struct proc *p)
 {
 	struct zlfs_mount *zmp = VFSTOZLFS(mp);
 	u_int64_t bpz;	/* filesystem blocks per zone */
+	u_int64_t ino, nlive;
 
 	bpz = (zmp->zm_super.zs_zone_cap_lba * zmp->zm_secsize) >>
 	    zmp->zm_bshift;
@@ -306,11 +327,29 @@ zlfs_statfs(struct mount *mp, struct statfs *sbp, struct proc *p)
 	sbp->f_iosize = sbp->f_bsize;
 	sbp->f_blocks = (zmp->zm_super.zs_total_zones - ZLFS_SB_ZONES) *
 	    bpz;
-	sbp->f_bfree = zlfs_zones_empty(zmp) * bpz;
+	/*
+	 * Free space the allocator can hand out right now: whole empty
+	 * zones plus the remainder of the log head zone.  Dead-but-
+	 * unreclaimed zones are not counted; they return via the cleaner.
+	 * The head fields are read unlocked, so clamp a mid-switch tear
+	 * instead of underflowing.
+	 */
+	sbp->f_bfree = zlfs_zones_freecount(zmp) * bpz;
+	if (zmp->zm_log_zend > zmp->zm_log_lba)
+		sbp->f_bfree += (zmp->zm_log_zend - zmp->zm_log_lba) *
+		    zmp->zm_secsize >> zmp->zm_bshift;
 	sbp->f_bavail = sbp->f_bfree;
-	sbp->f_files = 1;	/* the synthetic root */
-	sbp->f_ffree = 0;
-	sbp->f_favail = 0;
+	sbp->f_files = ZLFS_MAXINO(zmp);
+	/* zm_lock: zlfs_imap_grow may free and replace the map. */
+	rw_enter_read(&zmp->zm_lock);
+	nlive = 0;
+	for (ino = 0; ino < zmp->zm_ninodes; ino++) {
+		if (zmp->zm_imap[ino] != 0)
+			nlive++;
+	}
+	rw_exit_read(&zmp->zm_lock);
+	sbp->f_ffree = sbp->f_files - nlive;
+	sbp->f_favail = sbp->f_ffree;
 	copy_statfs_info(sbp, mp);
 
 	return 0;

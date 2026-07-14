@@ -40,14 +40,33 @@ int
 main(int argc, char *argv[])
 {
 	struct zlfs_args args;
-	int ch, mntflags;
-	char *dev, dir[PATH_MAX];
+	const char *errstr;
+	int ch, mntflags, sb_cap = 0;
+	char *dev, *opt, *opts, *rest, dir[PATH_MAX];
 
 	mntflags = 0;
 	while ((ch = getopt(argc, argv, "o:")) != -1) {
 		switch (ch) {
 		case 'o':
-			getmntopts(optarg, mopts, &mntflags);
+			/*
+			 * Handle the ZLFS-specific sbcap=N (test clamp on
+			 * superblock-zone capacity) here; hand everything
+			 * else to getmntopts.
+			 */
+			if ((opts = strdup(optarg)) == NULL)
+				err(1, "strdup");
+			for (rest = opts; (opt = strsep(&rest, ",")) != NULL;) {
+				if (strncmp(opt, "sbcap=", 6) == 0) {
+					sb_cap = strtonum(opt + 6, 1, 16384,
+					    &errstr);
+					if (errstr != NULL)
+						errx(1, "sbcap is %s: %s",
+						    errstr, opt + 6);
+				} else if (*opt != '\0') {
+					getmntopts(opt, mopts, &mntflags);
+				}
+			}
+			free(opts);
 			break;
 		default:
 			usage();
@@ -67,6 +86,7 @@ main(int argc, char *argv[])
 	memset(&args, 0, sizeof(args));
 	args.fspec = dev;
 	args.export_info.ex_root = DEFAULT_ROOTUID;
+	args.za_sb_cap = sb_cap;
 
 	/* Read-write by default; -o ro selects a read-only mount. */
 	if (mntflags & MNT_RDONLY)
@@ -81,7 +101,7 @@ main(int argc, char *argv[])
 static void __dead
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-o options] special node\n",
+	fprintf(stderr, "usage: %s [-o options[,sbcap=N]] special node\n",
 	    getprogname());
 	exit(1);
 }
