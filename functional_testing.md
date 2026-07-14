@@ -39,18 +39,19 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 
 | Feature | Commit | Verified so far | Missing evidence |
 |---|---|---|---|
-| SB-zone recycling (reset stale SB zone on ping-pong) | `422cb631771` | 2 adversarial rounds (caught FWRITE and wp-tracking bugs, then pass) | never exercised on VM: one SB zone holds 16384 superblocks (131072 LBAs / 8 per SB), so the first ping-pong needs ~16k commits; churn v2 produces ~300 — a dedicated many-commit test or a smaller-zone QEMU profile is needed |
+| SB-zone recycling (reset stale SB zone on ping-pong) | `422cb631771` + sbcap hook (pending push) | 2 adversarial rounds (caught FWRITE and wp-tracking bugs, then pass); now exercisable: `mount_zlfs -o sbcap=N` clamps each SB zone to N superblocks (test hook in `zlfs_args`), so the ping-pong fires every N commits instead of every ~16k | `zlfs-sbrecycle.sh sd1c` (40 syncs at sbcap=4 ≈ 10 recycles; marker file per generation; remount discovery across recycled zones; unclamped/reclamped remount continuation) — needs kernel + `mount_zlfs` rebuild |
 
 ## 3. Under analysis / known gaps
 
 | Item | Concrete detail | Impact | Plan |
 |---|---|---|---|
 | Unlinked-but-open file defers reclaim | zone pinned by pass 3 until the fd closes AND a later gated commit runs (`zlfs_commit` returns early when nothing is dirty) | space-liveness only, no data loss | acceptable for bring-up; revisit with the copying cleaner |
-| Corrupt-metadata hardening | a self-referential indirect entry (entry LBA == `zi_ib[0]`) would sleep forever in `getblk` (B_BUSY held by caller) | unreachable with well-formed metadata (allocator hands out distinct LBAs) | add bounds/identity checks on indirect entries when fsck-style validation is designed |
-| `statfs` free-space approximation | `f_bfree` counts EMPTY-condition zones only; mixed zones count as used; live_bytes is a zero/nonzero flag, inflated by duplicate marking | cosmetic accounting | proper per-zone byte accounting with the copying cleaner |
+| Corrupt-metadata hardening | FIXED (sbcap phase): `zlfs_bmap_read` returns `EIO` when an indirect entry names the indirect block itself — the only held-buffer collision, previously an unkillable `getblk` sleep | closed | — |
+| `statfs` accuracy | IMPROVED (sbcap phase): `f_bfree` = allocatable now (free zones + log-head remainder), `f_files`/`f_ffree` from the real inode map; dead-but-unreclaimed zones still count as used until the cleaner runs (honest for an LFS) | closed enough for bring-up | per-zone byte accounting with the copying cleaner |
 | `zst_live_bytes` semantics | only tested against 0 in the reset loop; not a true byte count | none today; trap for future code | rename or fix when the copying cleaner needs real counts |
 | Inode ceiling (was: single-block map, 512) | format v2 raises the cap to `ZLFS_CKPT_NIMAP * epb` (~256000 at a 4 KB block: ~500 map-block LBAs fit in the checkpoint block) | wide trees fine now; the ~256k cap is structural until the map gets its own indirection | none planned; revisit only if a workload needs more |
-| `zlfs_imap_grow` swaps `zm_imap` under `zm_lock` only | readers (`read_dinode`, commit, cleaner pass 2, remove/rmdir/rename) index the map without `zm_lock`; safe today because all accesses are single-expression under the kernel lock and grow has no sleep between copy and install — a latent use-after-free the moment these paths run MP-unlocked | none under the current single-threaded assumption | take `zm_lock` (or `zm_wlock`) in map readers as part of the concurrency-safe-commit phase |
+| `zlfs_imap_grow` swaps `zm_imap` under `zm_lock` only | readers (`read_dinode`, commit, cleaner pass 2, remove/rmdir/rename) index the map without `zm_lock`; safe today because all accesses are single-expression under the kernel lock and grow has no sleep between copy and install — a latent use-after-free the moment these paths run MP-unlocked.  `statfs` now takes `zm_lock` for its scan (sbcap phase) | none under the current single-threaded assumption | take `zm_lock` (or `zm_wlock`) in the remaining map readers as part of the concurrency-safe-commit phase |
+| Conventional (non-write-pointer) superblock zones would break the write path | discovery supports them (forward scan), but `zlfs_zones_load` copies `DK_ZONE_WP_INVALID` (~0) write pointers verbatim, so `zm_sb_lba` starts at ~0 and the first commit's superblock write targets a nonsense LBA (pre-existing; flagged by the sbcap review) | RW mount of a device with conventional zones 0-1 fails at the first commit; the QEMU ZNS target has no conventional zones | validate the active SB zone's write pointer at mount; proper conventional-zone append tracking when such a target matters |
 
 ## 4. Later (roadmap order)
 

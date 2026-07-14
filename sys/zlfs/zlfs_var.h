@@ -129,7 +129,6 @@ int		zlfs_bread_block(struct zlfs_mount *, u_int64_t, struct buf **);
 /* zlfs_alloc.c */
 int		zlfs_zones_load(struct zlfs_mount *);
 void		zlfs_zones_free(struct zlfs_mount *);
-u_int64_t	zlfs_zones_empty(struct zlfs_mount *);
 u_int64_t	zlfs_zones_freecount(struct zlfs_mount *);
 int		zlfs_log_init(struct zlfs_mount *, const struct dk_zone *);
 int		zlfs_alloc_block(struct zlfs_mount *, u_int64_t *);

@@ -94,22 +94,6 @@ zlfs_zones_free(struct zlfs_mount *zmp)
 }
 
 /*
- * Number of empty data zones (superblock zones excluded), for statfs.
- */
-u_int64_t
-zlfs_zones_empty(struct zlfs_mount *zmp)
-{
-	u_int64_t i, n = 0;
-
-	for (i = ZLFS_SB_ZONES; i < zmp->zm_nzones; i++) {
-		if (zmp->zm_zones[i].zst_cond == DK_ZONE_COND_EMPTY)
-			n++;
-	}
-
-	return n;
-}
-
-/*
  * Number of data zones the allocator can still switch into: those whose
  * write pointer is still at the zone start (never written or reclaimed).
  * The current log head zone is excluded even when still unwritten -- its

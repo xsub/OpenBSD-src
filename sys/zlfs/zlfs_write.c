@@ -83,6 +83,13 @@ zlfs_bmap_read(struct zlfs_node *znp, u_int64_t blkno, struct buf **ind,
 			return error;
 	}
 	*lbap = letoh64(((u_int64_t *)(*ind)->b_data)[blkno]);
+	/*
+	 * Corrupt-metadata guard: an entry naming the indirect block
+	 * itself would make the caller bread a buffer it already holds
+	 * and sleep forever in getblk.
+	 */
+	if (*lbap == zi->zi_ib[0])
+		return EIO;
 	return 0;
 }
 

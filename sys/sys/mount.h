@@ -270,6 +270,10 @@ struct fusefs_args {
 struct zlfs_args {
 	char	*fspec;			/* zoned block device to mount */
 	struct	export_args export_info; /* network export information */
+	int	za_sb_cap;		/* TEST: clamp each superblock zone
+					   to this many superblocks so zone
+					   recycling is exercisable quickly
+					   (0 = full zone capacity) */
 };
 
 /* per-filesystem mount options */
