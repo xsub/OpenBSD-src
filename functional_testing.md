@@ -34,12 +34,11 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 | Multi-block inode map (format v2: checkpoint carries the map-block LBA array; ~256k inodes at 4 KB; in-core map grows on demand) | `b9f24f306af` (rebased: `df898e2bf1b`) | 2026-07-13: `zlfs-manyfiles.sh` PASS — 700 files (> old 512 ceiling = 2 map blocks, exercising `zlfs_imap_grow` and the multi-block commit/load round trip), population + sampled contents intact after remount, removal persisted |
 | Read caching restored (`B_INVAL` gone; `vinvalbuf` purge after any zone reset) | `b9f24f306af` (rebased: `df898e2bf1b`) | 2026-07-13: churn v2 PASS on the v2 kernel — cleaner fired ~i90 (df 86% -> **7%**, deepest trough yet, exercising the reset-purge), 150/150 no ENOSPC, keeper intact after churn and after a remount served through the cache |
 | SB-zone recycling (reset stale SB zone on ping-pong; `-o sbcap=N` test clamp) | `422cb631771` + `051fa921161` | ZBD#16, 2026-07-14: `zlfs-sbrecycle.sh` PASS — clamp message in dmesg, 40 generations across ~10 physical zone recycles (each reset + cache purge), remount discovery found gen-40 among recycled zones, unclamped/reclamped continuation intact |
+| B2: per-block dirty tracking for regular files (sparse `zn_dblk` overlay; commit rewrites only dirty blocks, clean keep LBAs; RMW partial writes; truncate zero-tail invariant) + mmap coherence (`uvm_vnp_setsize`/`uncache`) | `3ebf9f07cbb`, `d651cc77a7c` | 2026-07-15: `zlfs-partialwrite.sh` full PASS — 1 MB indirect file, 10-byte RMW splice (one-block rewrite), append, shrink-then-grow reading zeroes, byte-for-byte `cmp` vs an FFS template after remount; churn regression PASS.  Run #1 caught the missing mmap invalidation (§6) |
 
 ## 2. In testing — pushed, awaiting VM evidence
 
-| Feature | Commit | Verified so far | Missing evidence |
-|---|---|---|---|
-| B2: per-block dirty tracking for regular files (sparse `zn_dblk` overlay; commit rewrites only dirty blocks, clean blocks keep their LBAs; RMW partial writes; truncate zero-tail invariant; no whole-file buffering) | `3ebf9f07cbb` + mmap-coherence fix (pending push) | 2 adversarial rounds (round 1: shrink-RMW blocker + EFAULT path, fixed; round 2 pass); VM run #1: churn regression PASS, `zlfs-partialwrite.sh` FAILED at the splice — not the write path but missing mmap invalidation (see §6), fixed with `uvm_vnp_setsize`/`uvm_vnp_uncache` per the ffs pattern | rerun `zlfs-partialwrite.sh sd1c` after kernel rebuild |
+*(empty — every pushed feature currently has VM evidence)*
 
 ## 3. Under analysis / known gaps
 
