@@ -36,6 +36,8 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 | SB-zone recycling (reset stale SB zone on ping-pong; `-o sbcap=N` test clamp) | `422cb631771` + `051fa921161` | ZBD#16, 2026-07-14: `zlfs-sbrecycle.sh` PASS — clamp message in dmesg, 40 generations across ~10 physical zone recycles (each reset + cache purge), remount discovery found gen-40 among recycled zones, unclamped/reclamped continuation intact |
 | B2: per-block dirty tracking for regular files (sparse `zn_dblk` overlay; commit rewrites only dirty blocks, clean keep LBAs; RMW partial writes; truncate zero-tail invariant) + mmap coherence (`uvm_vnp_setsize`/`uncache`) | `3ebf9f07cbb`, `d651cc77a7c` | 2026-07-15: `zlfs-partialwrite.sh` full PASS — 1 MB indirect file, 10-byte RMW splice (one-block rewrite), append, shrink-then-grow reading zeroes, byte-for-byte `cmp` vs an FFS template after remount; churn regression PASS.  Run #1 caught the missing mmap invalidation (§6) |
 
+| Double-indirect blocks (files to ~1 GB; lazy L1/L2 commit; `ZLFS_MAXDIRSZ` dir clamp; simplified `bmap`) | `b4ece2ebdab` | ZBD#19, 2026-07-19: `zlfs-bigfile.sh` PASS (16 MB across 7 L2 blocks, splice @10 MB, byte-for-byte after remount); partialwrite + churn regressions PASS (sawtooth 99% -> 21%). Verify round ran a userspace ASan harness over the real kernel fns (~50 commits, 14 injected failures) and caught the dir-growth EFBIG wedge pre-push |
+
 ## 2. In testing — pushed, awaiting VM evidence
 
 *(empty — every pushed feature currently has VM evidence)*
