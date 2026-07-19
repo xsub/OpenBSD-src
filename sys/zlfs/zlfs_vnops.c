@@ -26,6 +26,8 @@
 #include <sys/vnode.h>
 #include <sys/zlfs.h>
 
+#include <uvm/uvm_extern.h>
+
 #include <zlfs/zlfs_var.h>
 
 int	zlfs_lookup(void *);
@@ -457,6 +459,10 @@ zlfs_setattr(void *v)
 			}
 		}
 		znp->zn_dinode.zi_size = newsize;
+		/* Keep the UVM object's size and pages coherent (a shrink
+		 * frees the pages beyond the new end). */
+		uvm_vnp_setsize(vp, newsize);
+		(void)uvm_vnp_uncache(vp);
 		zlfs_node_dirty(znp);
 	}
 	return 0;
@@ -590,21 +596,30 @@ zlfs_write(void *v)
 		rmw = b * (u_int64_t)bsize < oldsize;
 		error = zlfs_dblk_prepare(znp, b, rmw);
 		if (error != 0)
-			return error;
+			goto out;
 		/* The overlay must reach a commit even on a later fault. */
 		zlfs_node_dirty(znp);
 		boff = (b == first) ? off % bsize : 0;
 		seg = MIN((u_int64_t)bsize - boff, end - (b * bsize + boff));
 		error = uiomove(znp->zn_dblk[b] + boff, seg, uio);
 		if (error != 0)
-			return error;
+			goto out;
 	}
 
-	if (end > oldsize)
+	if (end > oldsize) {
 		znp->zn_dinode.zi_size = end;
+		uvm_vnp_setsize(vp, end);
+	}
 	znp->zn_dinode.zi_mtime = gettime();
-	zlfs_node_dirty(znp);
-	return 0;
+out:
+	/*
+	 * Discard resident UVM pages so the next mmap fault re-reads
+	 * through VOP_READ and sees the new contents (mirrors ffs_write).
+	 * Runs on the error exits too: earlier blocks of this write may
+	 * already have changed.
+	 */
+	(void)uvm_vnp_uncache(vp);
+	return error;
 }
 
 /*
