@@ -137,16 +137,16 @@ zlfs_gc_mark(struct zlfs_mount *zmp, u_int64_t lba)
 static int
 zlfs_gc_mark_blocks(struct zlfs_mount *zmp, const struct zlfs_inode *zi)
 {
-	struct buf *bp;
-	u_int64_t j, nindir = ZLFS_NINDIR(zmp);
+	struct buf *bp, *l2bp;
+	u_int64_t j, k, l1, nindir = ZLFS_NINDIR(zmp);
 	int error;
 
 	/*
-	 * This implementation never writes double/triple indirect blocks;
-	 * if some other writer of this format did, the blocks they reach
+	 * This implementation never writes triple indirect blocks; if
+	 * some other writer of this format did, the blocks they reach
 	 * would not be marked, so refuse to reclaim anything.
 	 */
-	if (zi->zi_ib[1] != 0 || zi->zi_ib[2] != 0)
+	if (zi->zi_ib[2] != 0)
 		return EFTYPE;
 
 	for (j = 0; j < ZLFS_NDADDR; j++)
@@ -159,6 +159,28 @@ zlfs_gc_mark_blocks(struct zlfs_mount *zmp, const struct zlfs_inode *zi)
 		for (j = 0; j < nindir; j++)
 			zlfs_gc_mark(zmp,
 			    letoh64(((u_int64_t *)bp->b_data)[j]));
+		brelse(bp);
+	}
+	if (zi->zi_ib[1] != 0) {
+		zlfs_gc_mark(zmp, zi->zi_ib[1]);
+		error = zlfs_bread_block(zmp, zi->zi_ib[1], &bp);
+		if (error != 0)
+			return error;
+		for (j = 0; j < nindir; j++) {
+			l1 = letoh64(((u_int64_t *)bp->b_data)[j]);
+			if (l1 == 0)
+				continue;
+			zlfs_gc_mark(zmp, l1);
+			error = zlfs_bread_block(zmp, l1, &l2bp);
+			if (error != 0) {
+				brelse(bp);
+				return error;
+			}
+			for (k = 0; k < nindir; k++)
+				zlfs_gc_mark(zmp,
+				    letoh64(((u_int64_t *)l2bp->b_data)[k]));
+			brelse(l2bp);
+		}
 		brelse(bp);
 	}
 	return 0;
