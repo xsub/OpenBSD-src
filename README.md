@@ -451,10 +451,15 @@ Current limitations (documented in the code; each is a natural next step):
 
 Remaining sequence toward a general-purpose filesystem:
 
-1. Double/triple indirect blocks and per-block dirty tracking (so files
-   need not be buffered whole in memory).
+1. Double/triple indirect blocks (files past ~2 MB).
 2. A copying cleaner (compact mixed live/dead zones).
 3. Concurrency-safe commit.
+
+Regular files no longer buffer their whole contents in memory: writes
+land in a sparse per-block dirty overlay, partially covered blocks are
+read-modify-written, and a commit rewrites only the dirty blocks --
+clean blocks keep their on-disk location, so a small change to a large
+file no longer rewrites the file.
 
 ## Non-Goals For The Current Prototype
 

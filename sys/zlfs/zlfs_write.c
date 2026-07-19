@@ -20,6 +20,7 @@
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/pool.h>
+#include <sys/stat.h>
 #include <sys/vnode.h>
 #include <sys/dkio.h>
 #include <sys/zlfs.h>
@@ -76,8 +77,11 @@ zlfs_bmap_read(struct zlfs_node *znp, u_int64_t blkno, struct buf **ind,
 	if (blkno >= nindir)
 		return EFBIG;		/* beyond single indirect */
 	if (*ind == NULL) {
-		if (zi->zi_ib[0] == 0)
-			return EIO;
+		if (zi->zi_ib[0] == 0) {
+			/* No indirect block yet: the block is unmapped. */
+			*lbap = 0;
+			return 0;
+		}
 		error = zlfs_bread_block(zmp, zi->zi_ib[0], ind);
 		if (error != 0)
 			return error;
@@ -184,6 +188,180 @@ zlfs_node_dirty(struct zlfs_node *znp)
 }
 
 /*
+ * Make block blkno of a regular file dirty: ensure the overlay array
+ * covers it and the slot holds a block-sized buffer.  A fresh buffer is
+ * zeroed; when rmw is set and the block exists on disk its current
+ * contents are read in first, so a partial overwrite preserves the
+ * rest.  A buffer that is already dirty is left as is.
+ */
+int
+zlfs_dblk_prepare(struct zlfs_node *znp, u_int64_t blkno, int rmw)
+{
+	struct zlfs_mount *zmp = znp->zn_zmp;
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	struct buf *bp, *ind = NULL;
+	u_int8_t **narr;
+	u_int64_t lba;
+	u_int32_t want;
+	int error;
+
+	if (blkno >= ZLFS_NDADDR + ZLFS_NINDIR(zmp))
+		return EFBIG;
+
+	if (blkno >= znp->zn_ndblk) {
+		want = blkno + 1;
+		narr = mallocarray(want, sizeof(*narr), M_ZLFS,
+		    M_WAITOK | M_ZERO);
+		if (znp->zn_dblk != NULL) {
+			memcpy(narr, znp->zn_dblk,
+			    znp->zn_ndblk * sizeof(*narr));
+			free(znp->zn_dblk, M_ZLFS,
+			    znp->zn_ndblk * sizeof(*narr));
+		}
+		znp->zn_dblk = narr;
+		znp->zn_ndblk = want;
+	}
+	if (znp->zn_dblk[blkno] != NULL)
+		return 0;
+
+	znp->zn_dblk[blkno] = malloc(bsize, M_ZLFS, M_WAITOK | M_ZERO);
+	if (rmw) {
+		error = zlfs_bmap_read(znp, blkno, &ind, &lba);
+		if (ind != NULL)
+			brelse(ind);
+		if (error == 0 && lba != 0) {
+			error = zlfs_bread_block(zmp, lba, &bp);
+			if (error != 0) {
+				free(znp->zn_dblk[blkno], M_ZLFS, bsize);
+				znp->zn_dblk[blkno] = NULL;
+				return error;
+			}
+			memcpy(znp->zn_dblk[blkno], bp->b_data, bsize);
+			brelse(bp);
+		}
+		/* No on-disk block: stays zero (a hole being filled). */
+	}
+	return 0;
+}
+
+/* Free a regular file's dirty-block overlay. */
+void
+zlfs_dblk_free(struct zlfs_node *znp)
+{
+	struct zlfs_mount *zmp = znp->zn_zmp;
+	u_int32_t b, bsize = zmp->zm_super.zs_block_size;
+
+	if (znp->zn_dblk == NULL)
+		return;
+	for (b = 0; b < znp->zn_ndblk; b++) {
+		if (znp->zn_dblk[b] != NULL)
+			free(znp->zn_dblk[b], M_ZLFS, bsize);
+	}
+	free(znp->zn_dblk, M_ZLFS, znp->zn_ndblk * sizeof(*znp->zn_dblk));
+	znp->zn_dblk = NULL;
+	znp->zn_ndblk = 0;
+}
+
+/*
+ * Commit a regular file's dirty blocks: write each overlay buffer to a
+ * fresh LBA, keep the LBAs of clean blocks, and rebuild the single
+ * indirect block only when an entry in its range changed.  Works on a
+ * local copy of the inode so a failure leaves the in-core inode and
+ * the dirty overlay untouched (the retry re-runs from intact state and
+ * the partial writes are unreferenced garbage).
+ */
+static int
+zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
+{
+	struct zlfs_inode di = znp->zn_dinode;
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	u_int64_t nindir = ZLFS_NINDIR(zmp);
+	u_int64_t nblocks = howmany(di.zi_size, bsize);
+	u_int64_t *ient;
+	u_int8_t *blk;
+	struct buf *bp;
+	u_int64_t b, lba;
+	int error = 0, indir_dirty = 0;
+
+	if (nblocks > ZLFS_NDADDR + nindir)
+		return EFBIG;
+
+	/* Current indirect entries (host-endian), if the file has any. */
+	ient = mallocarray(nindir, sizeof(u_int64_t), M_ZLFS,
+	    M_WAITOK | M_ZERO);
+	if (di.zi_ib[0] != 0) {
+		error = zlfs_bread_block(zmp, di.zi_ib[0], &bp);
+		if (error != 0)
+			goto out;
+		for (b = 0; b < nindir; b++)
+			ient[b] = letoh64(((u_int64_t *)bp->b_data)[b]);
+		brelse(bp);
+	}
+
+	/* Dirty blocks inside the file get fresh LBAs. */
+	for (b = 0; b < znp->zn_ndblk && b < nblocks; b++) {
+		if (znp->zn_dblk[b] == NULL)
+			continue;
+		error = zlfs_alloc_block(zmp, &lba);
+		if (error != 0)
+			goto out;
+		error = zlfs_write_block(zmp, lba, znp->zn_dblk[b]);
+		if (error != 0)
+			goto out;
+		if (b < ZLFS_NDADDR) {
+			di.zi_db[b] = lba;
+		} else {
+			ient[b - ZLFS_NDADDR] = lba;
+			indir_dirty = 1;
+		}
+	}
+
+	/* A shrunk file drops the pointers beyond its new end. */
+	for (b = nblocks; b < ZLFS_NDADDR; b++)
+		di.zi_db[b] = 0;
+	for (b = (nblocks > ZLFS_NDADDR) ? nblocks - ZLFS_NDADDR : 0;
+	    b < nindir; b++) {
+		if (ient[b] != 0) {
+			ient[b] = 0;
+			indir_dirty = 1;
+		}
+	}
+
+	if (nblocks <= ZLFS_NDADDR) {
+		di.zi_ib[0] = 0;
+	} else if (indir_dirty || di.zi_ib[0] == 0) {
+		error = zlfs_alloc_block(zmp, &lba);
+		if (error != 0)
+			goto out;
+		blk = malloc(bsize, M_ZLFS, M_WAITOK | M_ZERO);
+		for (b = 0; b < nindir; b++)
+			((u_int64_t *)blk)[b] = htole64(ient[b]);
+		error = zlfs_write_block(zmp, lba, blk);
+		free(blk, M_ZLFS, bsize);
+		if (error != 0)
+			goto out;
+		di.zi_ib[0] = lba;
+	}
+
+	di.zi_blocks = 0;
+	for (b = 0; b < ZLFS_NDADDR; b++)
+		if (di.zi_db[b] != 0)
+			di.zi_blocks++;
+	for (b = 0; b < nindir; b++)
+		if (ient[b] != 0)
+			di.zi_blocks++;
+	if (di.zi_ib[0] != 0)
+		di.zi_blocks++;
+
+	/* Success: adopt the new pointers, drop the overlay. */
+	znp->zn_dinode = di;
+	zlfs_dblk_free(znp);
+out:
+	free(ient, M_ZLFS, nindir * sizeof(u_int64_t));
+	return error;
+}
+
+/*
  * Write a modified inode out as fresh log blocks: its data blocks (for
  * a loaded file/directory) followed by the inode block, recording the
  * inode block's LBA in the in-core inode map.
@@ -273,7 +451,18 @@ data_fail:
 		if (iblk != NULL)
 			free(iblk, M_ZLFS, bsize);
 		return error;
+	} else if ((zi->zi_mode & S_IFMT) == S_IFREG) {
+		/*
+		 * Regular file: write only the dirty blocks.  This also
+		 * runs for a dirty file with an empty overlay -- a bare
+		 * truncate must still drop the pointers beyond the new
+		 * end and recount zi_blocks.
+		 */
+		error = zlfs_commit_file_blocks(zmp, znp);
+		if (error != 0)
+			return error;
 	}
+	/* Anything else: metadata-only change; the inode rewrites as is. */
 
 write_inode:
 
@@ -419,8 +608,21 @@ zlfs_commit(struct zlfs_mount *zmp)
 		need = 1 + howmany(zmp->zm_ninodes,
 		    bsize / sizeof(u_int64_t));
 		LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
-			if (znp->zn_dirty)
+			u_int32_t b;
+
+			if (!znp->zn_dirty)
+				continue;
+			if (znp->zn_data != NULL) {
+				/* Directory: rewritten whole. */
 				need += howmany(znp->zn_datalen, bsize) + 2;
+				continue;
+			}
+			/* File: only its dirty blocks, + indirect + inode. */
+			need += 2;
+			for (b = 0; b < znp->zn_ndblk; b++) {
+				if (znp->zn_dblk[b] != NULL)
+					need++;
+			}
 		}
 		headfree = (zmp->zm_log_zend - zmp->zm_log_lba) / bpb;
 		freez = zlfs_zones_freecount(zmp);

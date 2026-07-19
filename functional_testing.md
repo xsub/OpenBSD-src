@@ -37,7 +37,9 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 
 ## 2. In testing — pushed, awaiting VM evidence
 
-*(empty — every pushed feature currently has VM evidence)*
+| Feature | Commit | Verified so far | Missing evidence |
+|---|---|---|---|
+| B2: per-block dirty tracking for regular files (sparse `zn_dblk` overlay; commit rewrites only dirty blocks, clean blocks keep their LBAs; RMW partial writes; truncate zero-tail invariant; no whole-file buffering) | pending push | 2 adversarial rounds — round 1 caught a blocker (uncommitted-shrink RMW resurrecting truncated bytes) and an EFAULT corruption path, both fixed by `rmw = block overlaps live data`; round 2: all lenses pass | `zlfs-partialwrite.sh sd1c` (splice/append/shrink-grow vs an FFS template, `cmp` oracle, remount) + `zlfs-gc-churn.sh` regression — kernel rebuild only |
 
 ## 3. Under analysis / known gaps
 
@@ -48,6 +50,7 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 | `statfs` accuracy | IMPROVED (sbcap phase): `f_bfree` = allocatable now (free zones + log-head remainder), `f_files`/`f_ffree` from the real inode map; dead-but-unreclaimed zones still count as used until the cleaner runs (honest for an LFS) | closed enough for bring-up | per-zone byte accounting with the copying cleaner |
 | `zst_live_bytes` semantics | only tested against 0 in the reset loop; not a true byte count | none today; trap for future code | rename or fix when the copying cleaner needs real counts |
 | Inode ceiling (was: single-block map, 512) | format v2 raises the cap to `ZLFS_CKPT_NIMAP * epb` (~256000 at a 4 KB block: ~500 map-block LBAs fit in the checkpoint block) | wide trees fine now; the ~256k cap is structural until the map gets its own indirection | none planned; revisit only if a workload needs more |
+| Commit vs concurrent write on the same file | `zlfs_commit_file_blocks` adoption frees the overlay (`zlfs_dblk_free`) without the vnode lock while a concurrent `write` could be filling a buffer — the documented single-threaded-commit assumption now shields a potential use-after-free, not just a stale flag | none under KERNEL_LOCK today | serialise commit against vnode ops in the concurrency-safe-commit phase |
 | `zlfs_imap_grow` swaps `zm_imap` under `zm_lock` only | readers (`read_dinode`, commit, cleaner pass 2, remove/rmdir/rename) index the map without `zm_lock`; safe today because all accesses are single-expression under the kernel lock and grow has no sleep between copy and install — a latent use-after-free the moment these paths run MP-unlocked.  `statfs` now takes `zm_lock` for its scan (sbcap phase) | none under the current single-threaded assumption | take `zm_lock` (or `zm_wlock`) in the remaining map readers as part of the concurrency-safe-commit phase |
 | Conventional (non-write-pointer) superblock zones would break the write path | discovery supports them (forward scan), but `zlfs_zones_load` copies `DK_ZONE_WP_INVALID` (~0) write pointers verbatim, so `zm_sb_lba` starts at ~0 and the first commit's superblock write targets a nonsense LBA (pre-existing; flagged by the sbcap review) | RW mount of a device with conventional zones 0-1 fails at the first commit; the QEMU ZNS target has no conventional zones | validate the active SB zone's write pointer at mount; proper conventional-zone append tracking when such a target matters |
 
