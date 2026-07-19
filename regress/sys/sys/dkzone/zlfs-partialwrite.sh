@@ -70,10 +70,16 @@ cmp "$tmpl" "$mnt/f" || die "append differs"
 echo "  ok: append committed"
 
 section "truncate shrink then grow (reappearing range must be zero)"
-truncate -s 500000 "$mnt/f"
-truncate -s 500000 "$tmpl"
-truncate -s 700000 "$mnt/f"
-truncate -s 700000 "$tmpl"
+# OpenBSD has no truncate(1); perl's truncate is ftruncate(2) directly.
+trunc()
+{
+	perl -e 'truncate $ARGV[0], $ARGV[1] or die "truncate: $!\n"' \
+	    "$1" "$2"
+}
+trunc "$mnt/f" 500000
+trunc "$tmpl" 500000
+trunc "$mnt/f" 700000
+trunc "$tmpl" 700000
 sync
 cmp "$tmpl" "$mnt/f" || die "truncate shrink/grow differs"
 echo "  ok: truncated range reads as zeroes"
