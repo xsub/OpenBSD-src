@@ -532,13 +532,17 @@ zlfs_ialloc(struct zlfs_mount *zmp, u_int32_t mode, struct vnode **vpp)
 	vp->v_type = IFTOVT(mode);
 
 	/*
-	 * Start with a one-block buffer; write/setattr/dir_add grow it on
-	 * demand up to the maximum file size.  The on-disk map slot fills
+	 * Directories keep their whole contents in core (zn_data, grown
+	 * on demand); regular files use the per-block dirty overlay,
+	 * allocated lazily on first write.  The on-disk map slot fills
 	 * at the next commit.
 	 */
-	znp->zn_dataalloc = zmp->zm_super.zs_block_size;
-	znp->zn_data = malloc(znp->zn_dataalloc, M_ZLFS, M_WAITOK | M_ZERO);
-	znp->zn_datalen = 0;
+	if (vp->v_type == VDIR) {
+		znp->zn_dataalloc = zmp->zm_super.zs_block_size;
+		znp->zn_data = malloc(znp->zn_dataalloc, M_ZLFS,
+		    M_WAITOK | M_ZERO);
+		znp->zn_datalen = 0;
+	}
 	zlfs_node_dirty(znp);
 
 	/*

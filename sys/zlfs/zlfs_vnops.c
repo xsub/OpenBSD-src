@@ -411,6 +411,8 @@ zlfs_setattr(void *v)
 	struct vattr *vap = ap->a_vap;
 	struct zlfs_node *znp = VTOZ(vp);
 	struct zlfs_mount *zmp = znp->zn_zmp;
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	u_int64_t b, newsize, oldsize;
 	int error;
 
 	if (zmp->zm_rdonly)
@@ -420,28 +422,50 @@ zlfs_setattr(void *v)
 			return EISDIR;
 		if (vap->va_size > ZLFS_MAXFILESZ(zmp))
 			return EFBIG;
-		error = zlfs_node_load(znp);
-		if (error != 0)
-			return error;
-		if (vap->va_size > znp->zn_datalen) {
-			error = zlfs_node_resize(znp, vap->va_size);
-			if (error != 0)
-				return error;
-			/* Zero the grown region (the buffer may be reused). */
-			memset(znp->zn_data + znp->zn_datalen, 0,
-			    vap->va_size - znp->zn_datalen);
+		newsize = vap->va_size;
+		oldsize = znp->zn_dinode.zi_size;
+
+		if (newsize > oldsize) {
+			/* Materialise the new blocks as zeroes (no holes).
+			 * The old EOF block's tail is zero by invariant. */
+			for (b = howmany(oldsize, bsize);
+			    b < howmany(newsize, bsize); b++) {
+				error = zlfs_dblk_prepare(znp, b, 0);
+				if (error != 0)
+					return error;
+			}
+		} else if (newsize < oldsize) {
+			/* Drop overlay buffers beyond the new end. */
+			for (b = howmany(newsize, bsize);
+			    b < znp->zn_ndblk; b++) {
+				if (znp->zn_dblk[b] != NULL) {
+					free(znp->zn_dblk[b], M_ZLFS, bsize);
+					znp->zn_dblk[b] = NULL;
+				}
+			}
+			/*
+			 * Zero the tail of the new EOF block so a later
+			 * grow cannot re-expose the truncated bytes.
+			 */
+			if (newsize % bsize != 0) {
+				b = newsize / bsize;
+				error = zlfs_dblk_prepare(znp, b, 1);
+				if (error != 0)
+					return error;
+				memset(znp->zn_dblk[b] + newsize % bsize, 0,
+				    bsize - newsize % bsize);
+			}
 		}
-		znp->zn_datalen = vap->va_size;
-		znp->zn_dinode.zi_size = vap->va_size;
+		znp->zn_dinode.zi_size = newsize;
 		zlfs_node_dirty(znp);
 	}
 	return 0;
 }
 
 /*
- * Read regular-file data.  Modified files are served from their in-core
- * copy; clean files are read on disk through zlfs_bmap_read, which
- * follows the direct and single-indirect block pointers.
+ * Read regular-file data block by block: a block with a dirty overlay
+ * buffer is served from it, everything else from disk through
+ * zlfs_bmap_read (direct and single-indirect pointers).
  */
 int
 zlfs_read(void *v)
@@ -465,20 +489,6 @@ zlfs_read(void *v)
 	if (uio->uio_offset < 0)
 		return EINVAL;
 
-	if (znp->zn_data != NULL) {
-		size = znp->zn_datalen;
-		while (uio->uio_resid > 0 &&
-		    (u_int64_t)uio->uio_offset < size) {
-			n = size - (u_int64_t)uio->uio_offset;
-			if (n > uio->uio_resid)
-				n = uio->uio_resid;
-			error = uiomove(znp->zn_data + uio->uio_offset, n, uio);
-			if (error != 0)
-				break;
-		}
-		return error;
-	}
-
 	size = zi->zi_size;
 	while (uio->uio_resid > 0 && (u_int64_t)uio->uio_offset < size) {
 		u_int64_t lba;
@@ -490,6 +500,14 @@ zlfs_read(void *v)
 			n = size - uio->uio_offset;
 		if (n > uio->uio_resid)
 			n = uio->uio_resid;
+
+		if (znp->zn_dblk != NULL && blkno < znp->zn_ndblk &&
+		    znp->zn_dblk[blkno] != NULL) {
+			error = uiomove(znp->zn_dblk[blkno] + boff, n, uio);
+			if (error != 0)
+				break;
+			continue;
+		}
 
 		error = zlfs_bmap_read(znp, blkno, &ind, &lba);
 		if (error == 0 && lba == 0)
@@ -511,9 +529,10 @@ zlfs_read(void *v)
 }
 
 /*
- * Write regular-file data into the in-core copy; it reaches disk at the
- * next commit.  The buffer grows on demand up to the maximum file size
- * (direct blocks plus one single-indirect block).
+ * Write regular-file data into the per-block dirty overlay; it reaches
+ * disk at the next commit, which rewrites only the dirty blocks.  A
+ * partially covered block is read-modify-written; blocks in a gap left
+ * by writing past end of file materialise as zeroes (no holes on disk).
  */
 int
 zlfs_write(void *v)
@@ -523,44 +542,66 @@ zlfs_write(void *v)
 	struct uio *uio = ap->a_uio;
 	struct zlfs_node *znp = VTOZ(vp);
 	struct zlfs_mount *zmp = znp->zn_zmp;
-	u_int64_t off, end, maxsz = ZLFS_MAXFILESZ(zmp);
-	size_t n;
-	int error;
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	u_int64_t off, end, oldsize, b, first, last, boff;
+	u_int64_t maxsz = ZLFS_MAXFILESZ(zmp);
+	size_t n, seg;
+	int error, rmw;
 
 	if (zmp->zm_rdonly)
 		return EROFS;
 	if (vp->v_type != VREG)
 		return EOPNOTSUPP;
 	if (ap->a_ioflag & IO_APPEND)
-		uio->uio_offset = znp->zn_datalen;
+		uio->uio_offset = znp->zn_dinode.zi_size;
 	if (uio->uio_offset < 0)
 		return EINVAL;
 	off = uio->uio_offset;
 	n = uio->uio_resid;
+	if (n == 0)
+		return 0;
 	if (off > maxsz || n > maxsz - off)
 		return EFBIG;
-
-	error = zlfs_node_load(znp);
-	if (error != 0)
-		return error;
-
 	end = off + n;
-	error = zlfs_node_resize(znp, end);
-	if (error != 0)
-		return error;
+	oldsize = znp->zn_dinode.zi_size;
 
-	/* Zero any gap created by writing past the current end. */
-	if (off > znp->zn_datalen)
-		memset(znp->zn_data + znp->zn_datalen, 0,
-		    off - znp->zn_datalen);
+	/* Materialise any gap between the old end and the write start. */
+	if (off > oldsize) {
+		for (b = oldsize / bsize; b < off / bsize; b++) {
+			/* Only the old EOF block holds live data. */
+			error = zlfs_dblk_prepare(znp, b,
+			    b * (u_int64_t)bsize < oldsize);
+			if (error != 0)
+				return error;
+		}
+	}
 
-	error = uiomove(znp->zn_data + off, n, uio);
-	if (error != 0)
-		return error;
+	first = off / bsize;
+	last = (end - 1) / bsize;
+	for (b = first; b <= last; b++) {
+		/*
+		 * Read the block's current contents whenever it overlaps
+		 * live data ([0, zi_size)): a faulting uiomove then leaves
+		 * old bytes rather than zeroes, and a block at or beyond
+		 * the current end never resurrects stale on-disk bytes --
+		 * an uncommitted shrink leaves its old pointers in the
+		 * inode until the next commit.
+		 */
+		rmw = b * (u_int64_t)bsize < oldsize;
+		error = zlfs_dblk_prepare(znp, b, rmw);
+		if (error != 0)
+			return error;
+		/* The overlay must reach a commit even on a later fault. */
+		zlfs_node_dirty(znp);
+		boff = (b == first) ? off % bsize : 0;
+		seg = MIN((u_int64_t)bsize - boff, end - (b * bsize + boff));
+		error = uiomove(znp->zn_dblk[b] + boff, seg, uio);
+		if (error != 0)
+			return error;
+	}
 
-	if (end > znp->zn_datalen)
-		znp->zn_datalen = end;
-	znp->zn_dinode.zi_size = znp->zn_datalen;
+	if (end > oldsize)
+		znp->zn_dinode.zi_size = end;
 	znp->zn_dinode.zi_mtime = gettime();
 	zlfs_node_dirty(znp);
 	return 0;
@@ -1046,6 +1087,7 @@ zlfs_reclaim(void *v)
 		}
 		if (znp->zn_data != NULL)
 			free(znp->zn_data, M_ZLFS, znp->zn_dataalloc);
+		zlfs_dblk_free(znp);
 		cache_purge(vp);
 		free(znp, M_ZLFS, sizeof(*znp));
 	}

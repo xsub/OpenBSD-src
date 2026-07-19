@@ -72,9 +72,17 @@ struct zlfs_node {
 	u_int64_t	 zn_ino;
 	int		 zn_onlist;	/* linked into zm_nodes? */
 	int		 zn_dirty;	/* needs commit */
-	u_int8_t	*zn_data;	/* in-core file/dir contents, or NULL */
+	u_int8_t	*zn_data;	/* VDIR: in-core contents, or NULL */
 	size_t		 zn_datalen;	/* valid bytes in zn_data */
 	size_t		 zn_dataalloc;	/* bytes allocated for zn_data */
+	/*
+	 * VREG: sparse per-block dirty overlay.  zn_dblk[b] is a
+	 * block-sized buffer holding block b's new contents, or NULL if
+	 * the block is clean (read from disk via the inode's pointers).
+	 * Clean blocks keep their on-disk LBAs across a commit.
+	 */
+	u_int8_t	**zn_dblk;	/* dirty block buffers, or NULL */
+	u_int32_t	 zn_ndblk;	/* slots in zn_dblk */
 	struct zlfs_inode zn_dinode;	/* host-endian inode copy */
 };
 
@@ -140,6 +148,8 @@ int		zlfs_bmap_read(struct zlfs_node *, u_int64_t, struct buf **,
 		    u_int64_t *);
 int		zlfs_node_load(struct zlfs_node *);
 int		zlfs_node_resize(struct zlfs_node *, size_t);
+int		zlfs_dblk_prepare(struct zlfs_node *, u_int64_t, int);
+void		zlfs_dblk_free(struct zlfs_node *);
 void		zlfs_node_dirty(struct zlfs_node *);
 int		zlfs_commit(struct zlfs_mount *);
 
