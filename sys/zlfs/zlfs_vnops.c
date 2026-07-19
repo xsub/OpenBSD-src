@@ -114,7 +114,7 @@ zlfs_dir_add(struct zlfs_node *dnp, const char *name, int namlen,
 		}
 	}
 	if (slot == (u_int64_t)-1) {
-		if (dnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXFILESZ(zmp))
+		if (dnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXDIRSZ(zmp))
 			return ENOSPC;
 		error = zlfs_node_resize(dnp, dnp->zn_datalen + ZLFS_DIRENT_SIZE);
 		if (error != 0)
@@ -471,7 +471,7 @@ zlfs_setattr(void *v)
 /*
  * Read regular-file data block by block: a block with a dirty overlay
  * buffer is served from it, everything else from disk through
- * zlfs_bmap_read (direct and single-indirect pointers).
+ * zlfs_bmap_read (direct, single- and double-indirect pointers).
  */
 int
 zlfs_read(void *v)
@@ -482,7 +482,7 @@ zlfs_read(void *v)
 	struct zlfs_node *znp = VTOZ(vp);
 	struct zlfs_mount *zmp = znp->zn_zmp;
 	struct zlfs_inode *zi = &znp->zn_dinode;
-	struct buf *bp, *ind = NULL;
+	struct buf *bp;
 	u_int64_t blkno, boff, size;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
 	size_t n;
@@ -515,7 +515,7 @@ zlfs_read(void *v)
 			continue;
 		}
 
-		error = zlfs_bmap_read(znp, blkno, &ind, &lba);
+		error = zlfs_bmap_read(znp, blkno, &lba);
 		if (error == 0 && lba == 0)
 			error = EIO;
 		if (error != 0)
@@ -528,8 +528,6 @@ zlfs_read(void *v)
 		if (error != 0)
 			break;
 	}
-	if (ind != NULL)
-		brelse(ind);
 
 	return error;
 }
@@ -938,7 +936,7 @@ zlfs_rename(void *v)
 			goto out;
 	}
 	if (tnp == NULL && fdvp != tdvp) {
-		if (tdnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXFILESZ(zmp)) {
+		if (tdnp->zn_datalen + ZLFS_DIRENT_SIZE > ZLFS_MAXDIRSZ(zmp)) {
 			error = ENOSPC;
 			goto out;
 		}

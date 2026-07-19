@@ -96,10 +96,21 @@ struct zlfs_node {
 	    ((zmp)->zm_super.zs_block_size / sizeof(u_int64_t)))
 
 /*
- * Largest file the write path supports: the direct blocks plus one
- * single-indirect block.  Double/triple indirect are not yet used.
+ * Largest file the write path supports: the direct blocks, one
+ * single-indirect block, and one double-indirect tree (about 1 GB at
+ * a 4 KB block size).  Triple indirect stays reserved.
  */
 #define ZLFS_MAXFILESZ(zmp) \
+	((ZLFS_NDADDR + ZLFS_NINDIR(zmp) + \
+	    ZLFS_NINDIR(zmp) * ZLFS_NINDIR(zmp)) * \
+	    (u_int64_t)(zmp)->zm_super.zs_block_size)
+
+/*
+ * Directories are committed through the whole-contents (zn_data) path,
+ * which writes direct plus single-indirect blocks only, so their growth
+ * must stop at that bound (16k+ entries at a 4 KB block).
+ */
+#define ZLFS_MAXDIRSZ(zmp) \
 	((ZLFS_NDADDR + ZLFS_NINDIR(zmp)) * \
 	    (u_int64_t)(zmp)->zm_super.zs_block_size)
 
@@ -144,8 +155,7 @@ void		zlfs_clean(struct zlfs_mount *);
 
 /* zlfs_write.c */
 int		zlfs_write_block(struct zlfs_mount *, u_int64_t, const void *);
-int		zlfs_bmap_read(struct zlfs_node *, u_int64_t, struct buf **,
-		    u_int64_t *);
+int		zlfs_bmap_read(struct zlfs_node *, u_int64_t, u_int64_t *);
 int		zlfs_node_load(struct zlfs_node *);
 int		zlfs_node_resize(struct zlfs_node *, size_t);
 int		zlfs_dblk_prepare(struct zlfs_node *, u_int64_t, int);
