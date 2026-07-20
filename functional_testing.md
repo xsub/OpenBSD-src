@@ -38,6 +38,8 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 
 | Double-indirect blocks (files to ~1 GB; lazy L1/L2 commit; `ZLFS_MAXDIRSZ` dir clamp; simplified `bmap`) | `b4ece2ebdab` | ZBD#19, 2026-07-19: `zlfs-bigfile.sh` PASS (16 MB across 7 L2 blocks, splice @10 MB, byte-for-byte after remount); partialwrite + churn regressions PASS (sawtooth 99% -> 21%). Verify round ran a userspace ASan harness over the real kernel fns (~50 commits, 14 injected failures) and caught the dir-growth EFBIG wedge pre-push |
 
+| Concurrency-safe commit (all `zm_imap` access under `zm_lock`; all-or-nothing commit under held vnode trylocks with retry; single-hold snapshots in commit and cleaner passes 2/3) | `a572b80f54a` | ZBD#20, 2026-07-20: full regression sweep PASS — churn (sawtooth 80% -> 3%, keeper intact), partialwrite (all 5 sections), bigfile (16 MB double-indirect, splice, remount cmp).  3 adversarial rounds caught 2 blockers + 3 bugs pre-push (lost-update, fsync-displacement, checkpoint atomicity, pass-3 displacement, LK_NOWAIT include) |
+
 ## 2. In testing — pushed, awaiting VM evidence
 
 *(empty — every pushed feature currently has VM evidence)*
