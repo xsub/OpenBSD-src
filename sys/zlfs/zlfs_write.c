@@ -29,13 +29,6 @@
 #include <zlfs/zlfs_var.h>
 
 /*
- * Run the zone cleaner at the start of a commit when the number of free
- * data zones drops below this, so a fresh segment always has somewhere
- * to go if any dead zones can be reclaimed.
- */
-#define ZLFS_GC_MIN_FREE	2
-
-/*
  * Write one filesystem block (block_size bytes) from data to device
  * LBA lba, staging through a DMA-capable buffer.
  */
@@ -119,6 +112,73 @@ zlfs_bmap_read(struct zlfs_node *znp, u_int64_t blkno, u_int64_t *lbap)
 		return 0;
 	}
 	return zlfs_indir_entry(zmp, l1, blkno % nindir, lbap);
+}
+
+/* True if lba is inside [start, end). */
+#define ZLFS_INRANGE(lba, start, end)	((lba) >= (start) && (lba) < (end))
+
+/*
+ * Return >0 if any block of the inode (data or metadata) falls in the
+ * LBA range [start, end), 0 if none, <0 on a read error.  Used by the
+ * copying cleaner to decide whether an inode must be relocated.
+ */
+int
+zlfs_node_owns_range(struct zlfs_node *znp, u_int64_t start, u_int64_t end)
+{
+	struct zlfs_mount *zmp = znp->zn_zmp;
+	struct zlfs_inode *zi = &znp->zn_dinode;
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	u_int64_t nblk = howmany(zi->zi_size, bsize), b, lba;
+	int error;
+
+	if (zlfs_node_owns_meta(znp, start, end))
+		return 1;
+	for (b = 0; b < nblk; b++) {
+		error = zlfs_bmap_read(znp, b, &lba);
+		if (error != 0)
+			return -1;
+		if (ZLFS_INRANGE(lba, start, end))
+			return 1;
+	}
+	return 0;
+}
+
+/*
+ * Return nonzero if any of the inode's metadata blocks -- its inode
+ * block or its indirect blocks (single, and the double tree's L1/L2) --
+ * lie in [start, end).  The inode block LBA comes from the in-core map.
+ */
+int
+zlfs_node_owns_meta(struct zlfs_node *znp, u_int64_t start, u_int64_t end)
+{
+	struct zlfs_mount *zmp = znp->zn_zmp;
+	struct zlfs_inode *zi = &znp->zn_dinode;
+	u_int64_t nindir = ZLFS_NINDIR(zmp);
+	struct buf *bp;
+	u_int64_t iblk, j, l1;
+
+	rw_enter_read(&zmp->zm_lock);
+	iblk = (znp->zn_ino < zmp->zm_ninodes) ?
+	    zmp->zm_imap[znp->zn_ino] : 0;
+	rw_exit_read(&zmp->zm_lock);
+	if (ZLFS_INRANGE(iblk, start, end))
+		return 1;
+	if (ZLFS_INRANGE(zi->zi_ib[0], start, end))
+		return 1;
+	if (ZLFS_INRANGE(zi->zi_ib[1], start, end))
+		return 1;
+	if (zi->zi_ib[1] != 0 &&
+	    zlfs_bread_block(zmp, zi->zi_ib[1], &bp) == 0) {
+		for (j = 0; j < nindir; j++) {
+			l1 = letoh64(((u_int64_t *)bp->b_data)[j]);
+			if (ZLFS_INRANGE(l1, start, end)) {
+				brelse(bp);
+				return 1;
+			}
+		}
+		brelse(bp);
+	}
+	return 0;
 }
 
 /*
@@ -421,6 +481,21 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 		}
 	}
 
+	/*
+	 * Compaction: force every live indirect block to move even though
+	 * its entries did not change, so it leaves the zone being cleaned.
+	 */
+	if (znp->zn_relocate) {
+		if (nblocks > ZLFS_NDADDR)
+			s_dirty = 1;		/* rewrite single indirect */
+		for (slot = 0; slot < howmany(dvalid, nindir); slot++) {
+			error = zlfs_l2_get(zmp, l1ent, l2tab, slot);
+			if (error != 0)
+				goto out;
+			l2mod[slot] = 1;	/* rewrite this L2 (and L1) */
+		}
+	}
+
 	/* Modified L2 blocks get fresh LBAs, recorded in the L1 table. */
 	for (slot = 0; slot < nindir; slot++) {
 		if (!l2mod[slot])
@@ -480,6 +555,7 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 
 	/* Success: adopt the new pointers, drop the overlay. */
 	znp->zn_dinode = di;
+	znp->zn_relocate = 0;
 	zlfs_dblk_free(znp);
 out:
 	for (slot = 0; slot < nindir; slot++) {
