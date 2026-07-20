@@ -65,7 +65,7 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
     <div class="card"><h3>Full namespace</h3><p>create / read / write / truncate, mkdir / rmdir, unlink, <b>rename</b> — including directories across parents with subtree-cycle rejection.</p></div>
     <div class="card"><h3>GC + circular log</h3><p>The cleaner reclaimed ~6.6 GB in one pass (df 98%→18%); 150 zone-fills on a 126-zone device with zero ENOSPC. Superblock zones recycle by ping-pong reset.</p></div>
     <div class="card"><h3>Per-block commit</h3><p>A 10-byte splice in a 1 MB file rewrites <b>one block</b>, not 250. Files to ~1 GB via double-indirect trees. mmap views stay coherent (UVM invalidation).</p></div>
-    <div class="card"><h3>Concurrency-safe</h3><p>All-or-nothing commits under held vnode locks; trylock + retry avoids the fsync deadlock. Full regression sweep green on the new kernel (ZBD#21).</p></div>
+    <div class="card"><h3>Concurrency-safe</h3><p>All-or-nothing commits under held vnode locks; trylock + retry avoids the fsync deadlock. Validated under 8-way concurrent writers with GC running under load.</p></div>
   </div>
 </section>
 
