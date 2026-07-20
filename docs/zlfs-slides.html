@@ -53,7 +53,7 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
   <div class="cols">
     <div class="card"><h3>ZBD layer</h3><p>A native kernel ABI: zone reports, zone management (reset/finish), a sequential-write safety gate in <span class="k">sd(4)</span>, both SCSI ZBC and NVMe ZNS paths.</p></div>
     <div class="card"><h3>ZLFS</h3><p>A log-structured filesystem designed <em>from scratch</em> for the zone contract: writes only at write pointers, nothing overwritten, commit = an appended generation-N+1 superblock.</p></div>
-    <div class="card"><h3>Why it matters</h3><p>A research platform and working proof that a full filesystem (directories, rename, GC, concurrency) runs on a device that forbids overwrites. Cheap capacity without a translation layer.</p></div>
+    <div class="card"><h3>Business case: append-only appliances</h3><p>Security appliances on big, cheap media: surveillance recorders (DVR/NVR), network flight recorders capturing packets, long-retention audit and syslog archives. These workloads are sequential by nature — exactly what SMR does best — and the circular log turns retention into zone recycling. OpenBSD’s security stack on capacity-class drives, with no translation layer in the way.</p></div>
   </div>
 </section>
 
