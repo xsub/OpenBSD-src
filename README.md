@@ -3,6 +3,7 @@
 [![OpenBSD](https://img.shields.io/badge/OpenBSD-f2ca30)](https://www.openbsd.org/)
 [![ZonedBlockDevice | driver](https://img.shields.io/badge/ZonedBlockDevice%20%7C%20driver-f2ca30)](https://github.com/xsub/OpenBSD-src)
 [![ZBD dkzone checks](https://github.com/xsub/OpenBSD-src/actions/workflows/zbd-ci.yml/badge.svg?branch=main)](https://github.com/xsub/OpenBSD-src/actions/workflows/zbd-ci.yml)
+[![Project slides](https://img.shields.io/badge/slides-zlfs--overview-f2ca30)](https://xsub.github.io/OpenBSD-src/zlfs-slides.html)
 
 Experimental OpenBSD source fork for native zoned block device support, focused on
 host-managed SCSI ZBC / SMR disks and NVMe Zoned Namespaces, and building up to
@@ -14,8 +15,10 @@ garbage collection with a circular log, and crash-safe commits, all validated
 on a QEMU NVMe ZNS VM -- with the limitations listed under "ZLFS Status And
 Direction" below.  `functional_testing.md` tracks, per feature, what is
 VM-validated, what is pushed and awaiting evidence, and every defect each
-verification round caught; `doc/zlfs-design.md` explains the architecture
-end to end, and `doc/zlfs-slides.html` is a five-slide project overview.  The fork is periodically rebased onto the OpenBSD
+verification round caught; `docs/zlfs-design.md` explains the architecture
+end to end, and the five-slide project overview renders live at
+<https://xsub.github.io/OpenBSD-src/zlfs-slides.html> (source:
+`docs/zlfs-slides.html`).  The fork is periodically rebased onto the OpenBSD
 mainline (last: July 2026).
 
 ## Goals
