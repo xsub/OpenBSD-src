@@ -14,7 +14,8 @@ garbage collection with a circular log, and crash-safe commits, all validated
 on a QEMU NVMe ZNS VM -- with the limitations listed under "ZLFS Status And
 Direction" below.  `functional_testing.md` tracks, per feature, what is
 VM-validated, what is pushed and awaiting evidence, and every defect each
-verification round caught.  The fork is periodically rebased onto the OpenBSD
+verification round caught; `doc/zlfs-design.md` explains the architecture
+end to end, and `doc/zlfs-slides.html` is a five-slide project overview.  The fork is periodically rebased onto the OpenBSD
 mainline (last: July 2026).
 
 ## Goals
