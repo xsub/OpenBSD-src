@@ -60,12 +60,12 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
 <section class="slide" id="s2">
   <p class="eyebrow">Slide 2/5 · Where it stands</p>
   <h1>It works — and every feature has <em>hardware evidence</em></h1>
-  <p class="lead">Method: implement → multi-agent adversarial verification → push → validate on a QEMU NVMe ZNS VM. Every shipped feature is VM-validated — the "awaiting evidence" table in <code>functional_testing.md</code> is empty; the architecture is documented in <code>doc/zlfs-design.md</code>.</p>
+  <p class="lead">The roadmap is complete. Method: implement → multi-agent adversarial verification → push → validate on a QEMU NVMe ZNS VM. Every shipped feature is VM-validated — the "awaiting evidence" table in <code>functional_testing.md</code> is empty; the architecture is documented in <code>doc/zlfs-design.md</code>.</p>
   <div class="cols">
     <div class="card"><h3>Full namespace</h3><p>create / read / write / truncate, mkdir / rmdir, unlink, <b>rename</b> — including directories across parents with subtree-cycle rejection.</p></div>
     <div class="card"><h3>GC + circular log</h3><p>The cleaner reclaimed ~6.6 GB in one pass (df 98%→18%); 150 zone-fills on a 126-zone device with zero ENOSPC. Superblock zones recycle by ping-pong reset.</p></div>
     <div class="card"><h3>Per-block commit</h3><p>A 10-byte splice in a 1 MB file rewrites <b>one block</b>, not 250. Files to ~1 GB via double-indirect trees. mmap views stay coherent (UVM invalidation).</p></div>
-    <div class="card"><h3>Concurrency-safe</h3><p>All-or-nothing commits under held vnode locks; trylock + retry avoids the fsync deadlock. Full regression sweep green on the new kernel (ZBD#20).</p></div>
+    <div class="card"><h3>Concurrency-safe</h3><p>All-or-nothing commits under held vnode locks; trylock + retry avoids the fsync deadlock. Full regression sweep green on the new kernel (ZBD#21).</p></div>
   </div>
 </section>
 
@@ -80,7 +80,7 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
   <div class="cols">
     <div class="card"><h3>Superblock = generation log</h3><p>Ping-pong across zones 0–1; the highest valid generation wins at mount. A crash before the append leaves the previous checkpoint in force — the log <em>is</em> the journal, so recovery is just mounting.</p></div>
     <div class="card"><h3>Checkpoint → map → inodes</h3><p>The checkpoint carries a multi-block inode map (~256k inodes); everything little-endian with CRC32C.</p></div>
-    <div class="card"><h3>GC in 3 passes</h3><p>Liveness = union of the durable checkpoint (re-read from disk), the in-core map, and open vnodes. Only fully dead zones are reset — crash-safe by construction.</p></div>
+    <div class="card"><h3>GC in 3 passes</h3><p>Liveness = union of the durable checkpoint (re-read from disk), the in-core map, and open vnodes. Fully dead zones are reset; mixed zones are compacted (live blocks relocated) — all crash-safe by construction.</p></div>
   </div>
 </section>
 
@@ -88,12 +88,12 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
   <p class="eyebrow">Slide 4/5 · Numbers (fork point 2026-07-04 → 07-20)</p>
   <h1>16 days from <em>zero to a working filesystem</em></h1>
   <div class="stats">
-    <div class="stat"><b>98</b><span>commits above mainline (34 ZLFS-prefixed)</span></div>
-    <div class="stat"><b>10 967</b><span>lines added · 62 files</span></div>
+    <div class="stat"><b>103</b><span>commits above mainline (39 ZLFS-prefixed)</span></div>
+    <div class="stat"><b>11 299</b><span>lines added · 64 files</span></div>
     <div class="stat"><b>4 230</b><span>lines of ZLFS kernel (sys/zlfs + format)</span></div>
     <div class="stat"><b>1 774</b><span>lines in sd(4)/NVMe/dkzone (ZBD layer)</span></div>
     <div class="stat"><b>714</b><span>lines of userland: newfs_zlfs, mount_zlfs</span></div>
-    <div class="stat"><b>14</b><span>regress scripts (5 ZLFS suites, 1 249 lines)</span></div>
+    <div class="stat"><b>15</b><span>regress scripts (6 ZLFS suites)</span></div>
     <div class="stat"><b>18</b><span>defects logged — every one caught before a user could hit it</span></div>
     <div class="stat"><b>v2</b><span>on-disk format; rebased onto mainline 07-13</span></div>
   </div>
@@ -109,8 +109,8 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
     <li><span class="tag t-done">DONE</span><span>GC: circular allocator + dead-zone cleaner + superblock-zone recycling</span></li>
     <li><span class="tag t-done">DONE</span><span>Per-block dirty tracking and double-indirect files (to ~1 GB)</span></li>
     <li><span class="tag t-done">DONE</span><span>Concurrency-safe commit — all-or-nothing under held locks; full regression sweep green</span></li>
-    <li><span class="tag t-now">NEXT UP</span><span>Copying cleaner — compact zones that mix live and dead blocks</span></li>
-    <li><span class="tag t-next">NEXT</span><span>Validation on a physical SMR drive (so far: QEMU NVMe ZNS)</span></li>
+    <li><span class="tag t-done">DONE</span><span>Copying cleaner — compacts mixed zones (validated: 40 pins survive 6 GB churn)</span></li>
+    <li><span class="tag t-next">BEYOND</span><span>Validation on a physical SMR drive (so far: QEMU NVMe ZNS)</span></li>
   </ul>
 </section>
 <div class="counter" id="ctr">1 / 5</div>
