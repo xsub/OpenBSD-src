@@ -40,6 +40,8 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 
 | Concurrency-safe commit (all `zm_imap` access under `zm_lock`; all-or-nothing commit under held vnode trylocks with retry; single-hold snapshots in commit and cleaner passes 2/3) | `a572b80f54a` | ZBD#20, 2026-07-20: full regression sweep PASS — churn (sawtooth 80% -> 3%, keeper intact), partialwrite (all 5 sections), bigfile (16 MB double-indirect, splice, remount cmp).  3 adversarial rounds caught 2 blockers + 3 bugs pre-push (lost-update, fsync-displacement, checkpoint atomicity, pass-3 displacement, LK_NOWAIT include) |
 
+| Copying cleaner (zone compaction): relocate a mixed zone`s live blocks via the dirty overlay so it can be reset; sync-path only (no vnode locks) | `c0d521dacd8`, `fc6e52ea516` | ZBD#21, 2026-07-20: `zlfs-compact.sh` PASS — 40 zones each mixing a kept pin with deleted junk, then 100 x 63 MB churn (~6.3 GB beyond the free budget, impossible for the dead-zone-only cleaner), all 40 pins cksum-intact after churn AND remount; GC churn regression PASS.  2 rounds caught 2 blockers pre-push (data-only relocation no-op; stranded indirect never rewritten) |
+
 ## 2. In testing — pushed, awaiting VM evidence
 
 *(empty — every pushed feature currently has VM evidence)*
