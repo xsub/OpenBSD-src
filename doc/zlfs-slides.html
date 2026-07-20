@@ -60,12 +60,12 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
 <section class="slide" id="s2">
   <p class="eyebrow">Slide 2/5 · Where it stands</p>
   <h1>It works — and every feature has <em>hardware evidence</em></h1>
-  <p class="lead">Method: implement → multi-agent adversarial verification → push → validate on a QEMU NVMe ZNS VM. The "awaiting evidence" table in <code>functional_testing.md</code> is empty; the architecture is documented in <code>doc/zlfs-design.md</code>.</p>
+  <p class="lead">Method: implement → multi-agent adversarial verification → push → validate on a QEMU NVMe ZNS VM. Every shipped feature is VM-validated — the "awaiting evidence" table in <code>functional_testing.md</code> is empty; the architecture is documented in <code>doc/zlfs-design.md</code>.</p>
   <div class="cols">
     <div class="card"><h3>Full namespace</h3><p>create / read / write / truncate, mkdir / rmdir, unlink, <b>rename</b> — including directories across parents with subtree-cycle rejection.</p></div>
     <div class="card"><h3>GC + circular log</h3><p>The cleaner reclaimed ~6.6 GB in one pass (df 98%→18%); 150 zone-fills on a 126-zone device with zero ENOSPC. Superblock zones recycle by ping-pong reset.</p></div>
     <div class="card"><h3>Per-block commit</h3><p>A 10-byte splice in a 1 MB file rewrites <b>one block</b>, not 250. Files to ~1 GB via double-indirect trees. mmap views stay coherent (UVM invalidation).</p></div>
-    <div class="card"><h3>Concurrency-safe</h3><p>All-or-nothing commits under held vnode locks; trylock + retry avoids the fsync deadlock. Churn and write-path regressions green on the new kernel.</p></div>
+    <div class="card"><h3>Concurrency-safe</h3><p>All-or-nothing commits under held vnode locks; trylock + retry avoids the fsync deadlock. Full regression sweep green on the new kernel (ZBD#20).</p></div>
   </div>
 </section>
 
@@ -88,8 +88,8 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
   <p class="eyebrow">Slide 4/5 · Numbers (fork point 2026-07-04 → 07-20)</p>
   <h1>16 days from <em>zero to a working filesystem</em></h1>
   <div class="stats">
-    <div class="stat"><b>96</b><span>commits above mainline (32 ZLFS-prefixed)</span></div>
-    <div class="stat"><b>10 838</b><span>lines added · 61 files</span></div>
+    <div class="stat"><b>98</b><span>commits above mainline (34 ZLFS-prefixed)</span></div>
+    <div class="stat"><b>10 967</b><span>lines added · 62 files</span></div>
     <div class="stat"><b>4 230</b><span>lines of ZLFS kernel (sys/zlfs + format)</span></div>
     <div class="stat"><b>1 774</b><span>lines in sd(4)/NVMe/dkzone (ZBD layer)</span></div>
     <div class="stat"><b>714</b><span>lines of userland: newfs_zlfs, mount_zlfs</span></div>
