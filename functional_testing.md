@@ -42,6 +42,8 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 
 | Copying cleaner (zone compaction): relocate a mixed zone`s live blocks via the dirty overlay so it can be reset; sync-path only (no vnode locks) | `c0d521dacd8`, `fc6e52ea516` | ZBD#21, 2026-07-20: `zlfs-compact.sh` PASS — 40 zones each mixing a kept pin with deleted junk, then 100 x 63 MB churn (~6.3 GB beyond the free budget, impossible for the dead-zone-only cleaner), all 40 pins cksum-intact after churn AND remount; GC churn regression PASS.  2 rounds caught 2 blockers pre-push (data-only relocation no-op; stranded indirect never rewritten) |
 
+| Concurrent-writers stress (multi-process): commit trylock/retry + compaction under live write load | `8ce0596b8ed` | ZBD#21, 2026-07-20: `zlfs-parallel.sh` PASS — 8 writers x 40 iters rewriting+syncing own files (direct/single/double indirect; half RMW-splicing) plus a background churn driving GC/compaction concurrently; every file byte-for-byte vs its template after the run AND after remount, keeper intact | first real multi-process test of the concurrency-safe commit |
+
 ## 2. In testing — pushed, awaiting VM evidence
 
 *(empty — every pushed feature currently has VM evidence)*
