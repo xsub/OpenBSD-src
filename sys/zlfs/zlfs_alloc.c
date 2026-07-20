@@ -294,11 +294,20 @@ pass1_fail:
 	}
 pass1_done:
 
-	/* Pass 2: the in-core live set, through zm_imap. */
-	for (ino = 0; ino < zmp->zm_ninodes; ino++) {
-		if (zmp->zm_imap[ino] == 0)
+	/* Pass 2: the in-core live set, through zm_imap.  Snapshot each
+	 * entry under zm_lock (the map may be grown/replaced) and read
+	 * the inode outside it. */
+	for (ino = 0;; ino++) {
+		rw_enter_read(&zmp->zm_lock);
+		lba = (ino < zmp->zm_ninodes) ? zmp->zm_imap[ino] : 0;
+		if (ino >= zmp->zm_ninodes) {
+			rw_exit_read(&zmp->zm_lock);
+			break;
+		}
+		rw_exit_read(&zmp->zm_lock);
+		if (lba == 0)
 			continue;
-		if (zlfs_gc_mark_inode(zmp, zmp->zm_imap[ino]) != 0)
+		if (zlfs_gc_mark_inode(zmp, lba) != 0)
 			return;
 	}
 
@@ -307,11 +316,55 @@ pass1_done:
 	 * unlinked-but-open file is in neither map once its removal has
 	 * been committed, yet the open vnode still reads its old blocks
 	 * from disk, so mark everything each in-core inode points at.
+	 * The marking sleeps (bread), so snapshot the inodes under
+	 * zm_lock first -- the list may change while we sleep.
 	 */
-	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
-		if (zlfs_gc_mark_blocks(zmp, &znp->zn_dinode) != 0)
-			return;
+	{
+		struct zlfs_inode *snap = NULL;
+		u_int64_t nsnap = 0, cap = 0, n, s;
+
+		/*
+		 * Count and fill under one zm_lock hold, with a headroom
+		 * retry when the list grew while we slept in malloc --
+		 * a node prepended during that sleep must not displace an
+		 * older one (the unlinked-but-open case pass 3 exists for)
+		 * out of a capped snapshot.
+		 */
+		for (;;) {
+			rw_enter_read(&zmp->zm_lock);
+			n = 0;
+			LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry)
+				n++;
+			if (n == 0) {
+				rw_exit_read(&zmp->zm_lock);
+				free(snap, M_TEMP, cap * sizeof(*snap));
+				goto pass3_done;
+			}
+			if (snap == NULL || n > cap) {
+				rw_exit_read(&zmp->zm_lock);
+				free(snap, M_TEMP, cap * sizeof(*snap));
+				cap = n + 8;
+				snap = mallocarray(cap, sizeof(*snap),
+				    M_TEMP, M_WAITOK);
+				continue;
+			}
+			LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
+				if (nsnap >= cap)
+					break;
+				snap[nsnap++] = znp->zn_dinode;
+			}
+			rw_exit_read(&zmp->zm_lock);
+			break;
+		}
+		for (s = 0; s < nsnap; s++) {
+			if (zlfs_gc_mark_blocks(zmp, &snap[s]) != 0) {
+				free(snap, M_TEMP, cap * sizeof(*snap));
+				return;
+			}
+		}
+		free(snap, M_TEMP, cap * sizeof(*snap));
 	}
+pass3_done:
 
 	/*
 	 * Reset any written-but-dead data zone.  The log head is spared

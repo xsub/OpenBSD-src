@@ -144,8 +144,14 @@ flushed before the superblock was appended.
 - **Locks**: `zm_wlock` serialises commits; `zm_lock` guards the node
   list and inode-map swaps; per-inode `rrwlock` vnode locks follow the
   ufs contracts (documented per-VOP in `zlfs_vnops.c`).  The write
-  path is single-threaded under `KERNEL_LOCK` by documented
-  assumption; the concurrency-safe-commit phase lifts this.
+  path no longer assumes single-threading: every `zm_imap`
+  reader/writer holds `zm_lock`; a commit snapshots dirty nodes under
+  `zm_lock` with vnode references and commits each under its vnode
+  lock — all locks taken up front with trylocks and held until the
+  dirty flags clear, so the checkpoint is an all-or-nothing set and no
+  write slips between a node's commit and its flag clear; contention
+  releases everything and retries after the holder finishes (avoiding
+  the vnode->wlock inversion).
 
 ## 8. Why these choices
 
