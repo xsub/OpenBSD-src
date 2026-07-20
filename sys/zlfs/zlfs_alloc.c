@@ -221,7 +221,6 @@ zlfs_gc_mark_all(struct zlfs_mount *zmp)
 	u_int64_t *dimap, *lbas;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
 	u_int64_t i, j, ino, lba, nblocks, epb = bsize / sizeof(u_int64_t);
-	int error;
 
 	for (i = 0; i < zmp->zm_nzones; i++)
 		zmp->zm_zones[i].zst_live_bytes = 0;
