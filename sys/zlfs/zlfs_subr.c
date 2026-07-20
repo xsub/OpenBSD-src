@@ -499,9 +499,10 @@ zlfs_read_dinode(struct zlfs_mount *zmp, u_int64_t ino, struct zlfs_inode *zi)
 	u_int64_t lba;
 	int error;
 
-	if (ino >= zmp->zm_ninodes)
-		return ENOENT;
-	lba = zmp->zm_imap[ino];
+	/* zm_lock: zlfs_imap_grow may free and replace the map. */
+	rw_enter_read(&zmp->zm_lock);
+	lba = (ino < zmp->zm_ninodes) ? zmp->zm_imap[ino] : 0;
+	rw_exit_read(&zmp->zm_lock);
 	if (lba == 0)
 		return ENOENT;
 

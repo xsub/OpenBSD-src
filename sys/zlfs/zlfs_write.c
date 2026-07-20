@@ -17,6 +17,7 @@
 #include <sys/systm.h>
 #include <sys/buf.h>
 #include <sys/endian.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/pool.h>
@@ -518,7 +519,9 @@ zlfs_commit_node(struct zlfs_mount *zmp, struct zlfs_node *znp)
 	 * written; its blocks become garbage for a later cleaner.
 	 */
 	if (znp->zn_dinode.zi_nlink == 0) {
+		rw_enter_write(&zmp->zm_lock);
 		zmp->zm_imap[znp->zn_ino] = 0;
+		rw_exit_write(&zmp->zm_lock);
 		return 0;
 	}
 
@@ -609,9 +612,11 @@ write_inode:
 	if (error != 0)
 		return error;
 
+	rw_enter_write(&zmp->zm_lock);
 	zmp->zm_imap[znp->zn_ino] = lba;
 	if (znp->zn_ino + 1 > zmp->zm_ninodes)
 		zmp->zm_ninodes = znp->zn_ino + 1;
+	rw_exit_write(&zmp->zm_lock);
 	return 0;
 }
 
@@ -693,10 +698,14 @@ zlfs_commit_super(struct zlfs_mount *zmp, u_int8_t *blk, u_int64_t generation,
  * Commit all dirty inodes as a new log segment and checkpoint.
  *
  * Serialised against other writers by zm_wlock.  The node list is
- * walked without zm_lock (taking it here would invert the vnode-lock
- * ordering used by zlfs_vget); this bring-up therefore assumes commits
- * do not run concurrently with vnode creation or reclaim.  Proper
- * concurrent-safe commit is future work.
+ * snapshotted under one zm_lock hold with vnode references (LK_NOWAIT
+ * vget skips dying vnodes), then ALL their vnode locks are taken up
+ * front with trylocks and held until the dirty flags clear -- so no
+ * write can race an overlay adoption or slip between a node's commit
+ * and its flag clear, and the checkpoint always covers a consistent
+ * all-or-nothing set.  Contention releases everything and retries,
+ * letting the holder (e.g. an fsync waiting for zm_wlock) finish.  The
+ * fsync caller's own node recurses through its rrwlock (RWL_DUPOK).
  */
 int
 zlfs_commit(struct zlfs_mount *zmp)
@@ -707,20 +716,78 @@ zlfs_commit(struct zlfs_mount *zmp)
 	u_int64_t imap_lba, ckpt_lba, newgen, i, j, n, epb, nblocks, ninodes;
 	u_int64_t *imap_lbas = NULL;
 	u_int8_t *blk = NULL;
-	int error = 0, ndirty = 0;
+	struct zlfs_node **dnodes = NULL;
+	int error = 0, ndirty = 0, nd = 0, di2, nl, tries;
 
 	if (zmp->zm_rdonly)
 		return EROFS;
 
-	rw_enter_write(&zmp->zm_wlock);
+	for (tries = 0;; tries++) {
+		rw_enter_write(&zmp->zm_wlock);
+		/*
+		 * Snapshot the dirty nodes and take their vnode locks, all
+		 * or nothing.  Count and fill run under one zm_lock hold,
+		 * so a node inserted at the list head while we slept in
+		 * malloc cannot displace an older dirty node (say, the
+		 * fsync caller's) out of the snapshot.
+		 */
+		rw_enter_read(&zmp->zm_lock);
+		nd = 0;
+		LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
+			if (znp->zn_dirty)
+				nd++;
+		}
+		if (nd == 0) {
+			rw_exit_read(&zmp->zm_lock);
+			rw_exit_write(&zmp->zm_wlock);
+			free(dnodes, M_TEMP, ndirty * sizeof(*dnodes));
+			return 0;
+		}
+		if (dnodes == NULL || nd > ndirty) {
+			rw_exit_read(&zmp->zm_lock);
+			rw_exit_write(&zmp->zm_wlock);
+			free(dnodes, M_TEMP, ndirty * sizeof(*dnodes));
+			ndirty = nd + 8;	/* headroom for new dirtiers */
+			dnodes = mallocarray(ndirty, sizeof(*dnodes),
+			    M_TEMP, M_WAITOK);
+			continue;
+		}
+		nd = 0;
+		LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
+			if (!znp->zn_dirty || nd >= ndirty)
+				continue;
+			/* A dying vnode is mid-reclaim; its in-core state
+			 * is lost either way (dirty-reclaim caveat). */
+			if (vget(znp->zn_vnode, LK_NOWAIT) != 0)
+				continue;
+			dnodes[nd++] = znp;
+		}
+		rw_exit_read(&zmp->zm_lock);
 
-	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
-		if (znp->zn_dirty)
-			ndirty++;
-	}
-	if (ndirty == 0) {
+		/*
+		 * Trylocks only: blocking on a vnode lock while holding
+		 * zm_wlock would deadlock against an fsync that holds the
+		 * vnode and waits for zm_wlock.  On contention release
+		 * everything and retry shortly; the holder finishes first.
+		 */
+		for (nl = 0; nl < nd; nl++) {
+			if (rrw_enter(&dnodes[nl]->zn_lock,
+			    RW_WRITE | RW_NOSLEEP) != 0)
+				break;
+		}
+		if (nl == nd)
+			break;		/* all locked; the commit proceeds */
+		while (nl-- > 0)
+			rrw_exit(&dnodes[nl]->zn_lock);
 		rw_exit_write(&zmp->zm_wlock);
-		return 0;
+		for (nl = 0; nl < nd; nl++)
+			vrele(dnodes[nl]->zn_vnode);
+		if (tries >= 9) {
+			free(dnodes, M_TEMP, ndirty * sizeof(*dnodes));
+			return EBUSY;
+		}
+		tsleep_nsec(&zmp->zm_wlock, PPAUSE, "zlfsretry",
+		    10 * 1000 * 1000ULL);
 	}
 
 	/*
@@ -740,11 +807,10 @@ zlfs_commit(struct zlfs_mount *zmp)
 		/* Checkpoint plus however many inode-map blocks. */
 		need = 1 + howmany(zmp->zm_ninodes,
 		    bsize / sizeof(u_int64_t));
-		LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
+		for (di2 = 0; di2 < nd; di2++) {
 			u_int32_t b;
 
-			if (!znp->zn_dirty)
-				continue;
+			znp = dnodes[di2];
 			if (znp->zn_data != NULL) {
 				/* Directory: rewritten whole. */
 				need += howmany(znp->zn_datalen, bsize) + 2;
@@ -767,11 +833,12 @@ zlfs_commit(struct zlfs_mount *zmp)
 			zlfs_clean(zmp);
 	}
 
-	/* 1. Data and inode blocks for every dirty inode. */
-	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry) {
-		if (!znp->zn_dirty)
-			continue;
-		error = zlfs_commit_node(zmp, znp);
+	/*
+	 * 1. Data and inode blocks for every dirty inode, each under its
+	 * vnode lock so writes cannot race the overlay adoption.
+	 */
+	for (di2 = 0; di2 < nd; di2++) {
+		error = zlfs_commit_node(zmp, dnodes[di2]);
 		if (error != 0)
 			goto out;
 	}
@@ -801,9 +868,12 @@ zlfs_commit(struct zlfs_mount *zmp)
 			goto out_blk;
 		memset(blk, 0, bsize);
 		n = MIN(epb, ninodes - j * epb);
+		/* zm_lock: a concurrent create may grow (replace) the map. */
+		rw_enter_read(&zmp->zm_lock);
 		for (i = 0; i < n; i++)
 			((u_int64_t *)blk)[i] =
 			    htole64(zmp->zm_imap[j * epb + i]);
+		rw_exit_read(&zmp->zm_lock);
 		error = zlfs_write_block(zmp, imap_lba, blk);
 		if (error != 0)
 			goto out_blk;
@@ -853,13 +923,20 @@ zlfs_commit(struct zlfs_mount *zmp)
 	 */
 	zmp->zm_super.zs_generation = newgen;
 	zmp->zm_super.zs_checkpoint_lba = ckpt_lba;
-	LIST_FOREACH(znp, &zmp->zm_nodes, zn_entry)
-		znp->zn_dirty = 0;
+	for (di2 = 0; di2 < nd; di2++)
+		dnodes[di2]->zn_dirty = 0;
 
 out_blk:
 	free(imap_lbas, M_ZLFS, bsize - sizeof(struct zlfs_checkpoint));
 	free(blk, M_ZLFS, bsize);
 out:
+	/* Dirty flags cleared (or preserved on failure) under the node
+	 * locks; release them, then the commit lock, then the refs. */
+	for (di2 = 0; di2 < nd; di2++)
+		rrw_exit(&dnodes[di2]->zn_lock);
 	rw_exit_write(&zmp->zm_wlock);
+	for (di2 = 0; di2 < nd; di2++)
+		vrele(dnodes[di2]->zn_vnode);
+	free(dnodes, M_TEMP, ndirty * sizeof(*dnodes));
 	return error;
 }

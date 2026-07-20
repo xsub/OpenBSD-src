@@ -795,8 +795,11 @@ zlfs_remove(void *v)
 
 	if (np->zn_dinode.zi_nlink > 0)
 		np->zn_dinode.zi_nlink--;
-	if (np->zn_dinode.zi_nlink == 0)
+	if (np->zn_dinode.zi_nlink == 0) {
+		rw_enter_write(&zmp->zm_lock);
 		zmp->zm_imap[np->zn_ino] = 0;
+		rw_exit_write(&zmp->zm_lock);
+	}
 	zlfs_node_dirty(np);
 	return 0;
 }
@@ -837,7 +840,9 @@ zlfs_rmdir(void *v)
 	zlfs_node_dirty(dnp);
 	np->zn_dinode.zi_nlink = 0;
 	np->zn_datalen = 0;
+	rw_enter_write(&zmp->zm_lock);
 	zmp->zm_imap[np->zn_ino] = 0;
+	rw_exit_write(&zmp->zm_lock);
 	zlfs_node_dirty(np);
 
 out:
@@ -963,7 +968,9 @@ zlfs_rename(void *v)
 			tdnp->zn_dinode.zi_nlink--;	/* lost target's ".." */
 		tnp->zn_dinode.zi_nlink = 0;
 		tnp->zn_datalen = 0;
+		rw_enter_write(&zmp->zm_lock);
 		zmp->zm_imap[tnp->zn_ino] = 0;
+		rw_exit_write(&zmp->zm_lock);
 		zlfs_node_dirty(tnp);
 	}
 
