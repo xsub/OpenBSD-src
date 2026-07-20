@@ -110,6 +110,10 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
     <li><span class="tag t-done">DONE</span><span>Per-block dirty tracking and double-indirect files (to ~1 GB)</span></li>
     <li><span class="tag t-done">DONE</span><span>Concurrency-safe commit — all-or-nothing under held locks; full regression sweep green</span></li>
     <li><span class="tag t-done">DONE</span><span>Copying cleaner — compacts mixed zones (validated: 40 pins survive 6 GB churn)</span></li>
+    <li><span class="tag t-next">BEYOND</span><span>Triple-indirect blocks — lift the ~1 GB file cap to TB-scale (format slot already reserved)</span></li>
+    <li><span class="tag t-next">BEYOND</span><span>Power-fail testing — torn-write &amp; mid-commit crash injection to prove "recovery = mount"</span></li>
+    <li><span class="tag t-next">BEYOND</span><span>fsck_zlfs — offline consistency check and repair</span></li>
+    <li><span class="tag t-next">BEYOND</span><span>POSIX gaps — symlinks, hard links, advisory locking (flock/lockf)</span></li>
     <li><span class="tag t-next">BEYOND</span><span>Validation on a physical SMR drive (so far: QEMU NVMe ZNS)</span></li>
   </ul>
 </section>
