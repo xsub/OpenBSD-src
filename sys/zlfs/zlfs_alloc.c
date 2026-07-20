@@ -204,39 +204,24 @@ zlfs_gc_mark_inode(struct zlfs_mount *zmp, u_int64_t lba)
 }
 
 /*
- * Reclaim fully dead data zones.
- *
- * A zone may be reset only if neither of two live sets reaches it:
- *
- *  1. The DURABLE set: everything reachable from the on-disk checkpoint
- *     through the inode-map block it references.  The in-core map is
- *     not a substitute -- unlink/rmdir/rename clear its entries before
- *     the next commit, and a failed commit leaves it pointing at new,
- *     not-yet-durable inode blocks -- so the map is re-read from disk.
- *     This is what a crash recovery can reach; erasing any of it would
- *     lose committed data.
- *
- *  2. The IN-CORE set: everything reachable through zm_imap right now,
- *     including inode blocks written by an earlier failed commit that
- *     the durable checkpoint does not know about.  The mounted
- *     filesystem still reads through these.
- *
- * Any read failure leaves a live set incomplete, so the scan bails and
- * reclaims nothing rather than risk resetting live data.  Zones with a
- * mix of live and dead blocks are left alone (a copying cleaner is
- * future work); the log head zone is never reset.
+ * Compute per-zone liveness (zst_live_bytes) as the union of three live
+ * sets: the durable checkpoint re-read from disk (what a crash recovery
+ * reaches -- the in-core map is not a substitute, since unlink/rename
+ * clear entries before the next commit and a failed commit leaves stale
+ * ones), the in-core inode map, and every in-core vnode.  Returns
+ * nonzero if any read failed, in which case the accounting is
+ * incomplete and callers must not reclaim or relocate anything.
  */
-void
-zlfs_clean(struct zlfs_mount *zmp)
+static int
+zlfs_gc_mark_all(struct zlfs_mount *zmp)
 {
-	struct zlfs_zone_state *zst;
 	struct zlfs_node *znp;
 	struct buf *bp;
 	const struct zlfs_checkpoint *dc;
 	u_int64_t *dimap, *lbas;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
 	u_int64_t i, j, ino, lba, nblocks, epb = bsize / sizeof(u_int64_t);
-	int error, nreset = 0;
+	int error;
 
 	for (i = 0; i < zmp->zm_nzones; i++)
 		zmp->zm_zones[i].zst_live_bytes = 0;
@@ -252,12 +237,12 @@ zlfs_clean(struct zlfs_mount *zmp)
 	if (zmp->zm_super.zs_checkpoint_lba != 0) {
 		if (zlfs_bread_block(zmp, zmp->zm_super.zs_checkpoint_lba,
 		    &bp) != 0)
-			return;
+			return 1;
 		dc = (const struct zlfs_checkpoint *)bp->b_data;
 		nblocks = letoh64(dc->zc_imap_nblocks);
 		if (nblocks == 0 || nblocks > ZLFS_CKPT_NIMAP(bsize)) {
 			brelse(bp);
-			return;		/* unusable map; reclaim nothing */
+			return 1;		/* unusable map; reclaim nothing */
 		}
 		lbas = mallocarray(nblocks, sizeof(u_int64_t), M_TEMP,
 		    M_WAITOK);
@@ -290,7 +275,7 @@ zlfs_clean(struct zlfs_mount *zmp)
 pass1_fail:
 		free(dimap, M_TEMP, bsize);
 		free(lbas, M_TEMP, nblocks * sizeof(u_int64_t));
-		return;
+		return 1;
 	}
 pass1_done:
 
@@ -308,7 +293,7 @@ pass1_done:
 		if (lba == 0)
 			continue;
 		if (zlfs_gc_mark_inode(zmp, lba) != 0)
-			return;
+			return 1;
 	}
 
 	/*
@@ -359,12 +344,25 @@ pass1_done:
 		for (s = 0; s < nsnap; s++) {
 			if (zlfs_gc_mark_blocks(zmp, &snap[s]) != 0) {
 				free(snap, M_TEMP, cap * sizeof(*snap));
-				return;
+				return 1;
 			}
 		}
 		free(snap, M_TEMP, cap * sizeof(*snap));
 	}
 pass3_done:
+
+	return 0;
+}
+
+void
+zlfs_clean(struct zlfs_mount *zmp)
+{
+	struct zlfs_zone_state *zst;
+	u_int64_t i;
+	int error, nreset = 0;
+
+	if (zlfs_gc_mark_all(zmp) != 0)
+		return;
 
 	/*
 	 * Reset any written-but-dead data zone.  The log head is spared
@@ -397,6 +395,141 @@ pass3_done:
 	 */
 	if (nreset > 0)
 		zlfs_cache_purge_dev(zmp);
+}
+
+/*
+ * Dirty every in-core inode that owns a block in the victim zone, so
+ * the next commit relocates those blocks to fresh LBAs and the zone
+ * becomes fully dead (a later zlfs_clean then resets it).  A regular
+ * file's data blocks are pulled into its dirty overlay; any hit on an
+ * inode's metadata (indirect or inode block) or on a directory just
+ * marks the whole inode dirty, so the commit rewrites it.
+ *
+ * MUST be called with no vnode locks held (it blocks in VFS_VGET); the
+ * only caller is the sync path.
+ */
+static int
+zlfs_compact_zone(struct zlfs_mount *zmp, u_int64_t victim)
+{
+	struct zlfs_node *znp;
+	struct vnode *vp;
+	u_int32_t bsize = zmp->zm_super.zs_block_size;
+	u_int64_t vstart = zmp->zm_zones[victim].zst_start_lba;
+	u_int64_t vend = vstart + zmp->zm_zones[victim].zst_cap_lba;
+	u_int64_t *inos, ninos = 0, cap, k, b, nblk, lba;
+	int error = 0, prepared;
+
+	/* Snapshot the live inode numbers under zm_lock. */
+	rw_enter_read(&zmp->zm_lock);
+	cap = zmp->zm_ninodes;
+	inos = mallocarray(cap ? cap : 1, sizeof(*inos), M_TEMP, M_WAITOK);
+	for (k = 0; k < zmp->zm_ninodes && ninos < cap; k++) {
+		if (zmp->zm_imap[k] != 0)
+			inos[ninos++] = k;
+	}
+	rw_exit_read(&zmp->zm_lock);
+
+	for (k = 0; k < ninos; k++) {
+		error = VFS_VGET(zmp->zm_mountp, inos[k], &vp);
+		if (error != 0) {
+			if (error == ENOENT)	/* removed since the snapshot */
+				continue;
+			break;
+		}
+		znp = VTOZ(vp);
+
+		if (vp->v_type == VDIR) {
+			/* Whole directory relocates if any block is here. */
+			int hit = zlfs_node_owns_range(znp, vstart, vend);
+			if (hit > 0) {
+				if (zlfs_node_load(znp) == 0)
+					zlfs_node_dirty(znp);
+			}
+			vput(vp);
+			if (hit < 0) {
+				error = EIO;
+				break;
+			}
+			continue;
+		}
+		if (vp->v_type != VREG) {
+			/* Only VREG and VDIR inodes exist today (mknod/
+			 * symlink/link are unsupported); any other type
+			 * would keep its victim blocks live and stall the
+			 * compactor, so it must relocate them if added. */
+			vput(vp);
+			continue;
+		}
+
+		/*
+		 * Pull each in-victim data block into the overlay so the
+		 * commit rewrites it elsewhere; if any of the inode's
+		 * metadata (inode or indirect blocks) is also in the
+		 * victim, force the commit to relocate the indirect blocks
+		 * too.  Either way the node must be dirtied to be picked up.
+		 */
+		nblk = howmany(znp->zn_dinode.zi_size, bsize);
+		prepared = 0;
+		for (b = 0; b < nblk; b++) {
+			error = zlfs_bmap_read(znp, b, &lba);
+			if (error != 0)
+				break;
+			if (lba >= vstart && lba < vend) {
+				error = zlfs_dblk_prepare(znp, b, 1);
+				if (error != 0)
+					break;
+				prepared = 1;
+			}
+		}
+		if (error == 0 && zlfs_node_owns_meta(znp, vstart, vend)) {
+			znp->zn_relocate = 1;
+			prepared = 1;
+		}
+		if (error == 0 && prepared)
+			zlfs_node_dirty(znp);
+		vput(vp);
+		if (error != 0)
+			break;
+	}
+
+	free(inos, M_TEMP, (cap ? cap : 1) * sizeof(*inos));
+	return error;
+}
+
+/*
+ * Copying garbage collection: relocate the live blocks out of the
+ * least-live written zone so a later zlfs_clean can reclaim it.  Called
+ * from the sync path when whole-zone reclamation cannot keep up (mixed
+ * live/dead zones dominate).  Returns nonzero on an I/O error, in which
+ * case nothing was relocated.
+ */
+int
+zlfs_compact(struct zlfs_mount *zmp)
+{
+	struct zlfs_zone_state *zst;
+	u_int64_t i, victim = 0, best = 0;
+
+	if (zlfs_gc_mark_all(zmp) != 0)
+		return EIO;
+
+	/* Pick the written, non-head zone with the fewest live bytes. */
+	for (i = ZLFS_SB_ZONES; i < zmp->zm_nzones; i++) {
+		if (i == zmp->zm_log_zidx)
+			continue;
+		zst = &zmp->zm_zones[i];
+		if (zst->zst_wp_lba == zst->zst_start_lba)
+			continue;		/* empty, nothing to move */
+		if (zst->zst_live_bytes == 0)
+			continue;		/* fully dead; clean handles it */
+		if (best == 0 || zst->zst_live_bytes < best) {
+			best = zst->zst_live_bytes;
+			victim = i;
+		}
+	}
+	if (best == 0)
+		return 0;		/* no mixed zone to compact */
+
+	return zlfs_compact_zone(zmp, victim);
 }
 
 /*

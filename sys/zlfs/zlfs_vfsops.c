@@ -363,6 +363,16 @@ zlfs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred,
 
 	if (zmp->zm_rdonly)
 		return 0;
+	/*
+	 * When whole-zone reclamation can no longer keep the log fed
+	 * (free zones are scarce because the written zones are a mix of
+	 * live and dead blocks), relocate the live blocks out of the
+	 * least-live zone so the next commit's cleaner can reset it.
+	 * Only the sync path does this: it holds no vnode locks, so the
+	 * per-inode VFS_VGET inside cannot deadlock.
+	 */
+	if (zlfs_zones_freecount(zmp) < ZLFS_GC_MIN_COMPACT)
+		(void)zlfs_compact(zmp);
 	return zlfs_commit(zmp);
 }
 

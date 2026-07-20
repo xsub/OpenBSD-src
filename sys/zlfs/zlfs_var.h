@@ -83,6 +83,9 @@ struct zlfs_node {
 	 */
 	u_int8_t	**zn_dblk;	/* dirty block buffers, or NULL */
 	u_int32_t	 zn_ndblk;	/* slots in zn_dblk */
+	int		 zn_relocate;	/* GC: rewrite indirect blocks even
+					   if unchanged, to move them off a
+					   zone being compacted */
 	struct zlfs_inode zn_dinode;	/* host-endian inode copy */
 };
 
@@ -123,6 +126,15 @@ struct zlfs_node {
 /* Index of the device zone containing an LBA (zones are uniform). */
 #define ZLFS_ZONEOF(zmp, lba)	((lba) / (zmp)->zm_super.zs_zone_size_lba)
 
+/*
+ * Free-data-zone thresholds.  Below MIN_FREE a commit resets any fully
+ * dead zones first; below MIN_COMPACT (higher, so it triggers earlier)
+ * the sync path relocates a mixed zone's live blocks so a dead zone can
+ * then be reclaimed.
+ */
+#define ZLFS_GC_MIN_FREE	2
+#define ZLFS_GC_MIN_COMPACT	4
+
 extern const struct vops zlfs_vops;
 
 /* zlfs_vfsops.c */
@@ -150,6 +162,7 @@ int		zlfs_zones_load(struct zlfs_mount *);
 void		zlfs_zones_free(struct zlfs_mount *);
 u_int64_t	zlfs_zones_freecount(struct zlfs_mount *);
 int		zlfs_log_init(struct zlfs_mount *, const struct dk_zone *);
+int		zlfs_compact(struct zlfs_mount *);
 int		zlfs_alloc_block(struct zlfs_mount *, u_int64_t *);
 void		zlfs_clean(struct zlfs_mount *);
 
@@ -157,6 +170,8 @@ void		zlfs_clean(struct zlfs_mount *);
 int		zlfs_write_block(struct zlfs_mount *, u_int64_t, const void *);
 int		zlfs_bmap_read(struct zlfs_node *, u_int64_t, u_int64_t *);
 int		zlfs_node_load(struct zlfs_node *);
+int		zlfs_node_owns_range(struct zlfs_node *, u_int64_t, u_int64_t);
+int		zlfs_node_owns_meta(struct zlfs_node *, u_int64_t, u_int64_t);
 int		zlfs_node_resize(struct zlfs_node *, size_t);
 int		zlfs_dblk_prepare(struct zlfs_node *, u_int64_t, int);
 void		zlfs_dblk_free(struct zlfs_node *);
