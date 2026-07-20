@@ -1,0 +1,126 @@
+<title>ZLFS — OpenBSD on zoned storage</title>
+<style>
+:root{
+  --bg:#f5f2e6;--panel:#ece7d6;--ink:#23272c;--mut:#6b6f66;--acc:#8a6d00;--accbg:#f2ca30;
+  --ok:#2e7d5b;--line:#d8d2bd;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#101418;--panel:#1a2027;--ink:#e8e4d8;--mut:#8a93a0;--acc:#f2ca30;--accbg:#f2ca30;
+  --ok:#58b09c;--line:#2a323c;}}
+:root[data-theme="dark"]{--bg:#101418;--panel:#1a2027;--ink:#e8e4d8;--mut:#8a93a0;--acc:#f2ca30;--accbg:#f2ca30;--ok:#58b09c;--line:#2a323c;}
+:root[data-theme="light"]{--bg:#f5f2e6;--panel:#ece7d6;--ink:#23272c;--mut:#6b6f66;--acc:#8a6d00;--accbg:#f2ca30;--ok:#2e7d5b;--line:#d8d2bd;}
+*{box-sizing:border-box}
+html{scroll-snap-type:y mandatory}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,sans-serif}
+.slide{min-height:100vh;scroll-snap-align:start;display:flex;flex-direction:column;justify-content:center;
+  padding:6vh 8vw;border-bottom:1px solid var(--line);position:relative}
+.eyebrow{font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.18em;color:var(--acc);
+  text-transform:uppercase;margin:0 0 14px}
+h1{font-size:clamp(26px,4.6vw,54px);font-weight:900;line-height:1.06;margin:0 0 18px;text-wrap:balance;letter-spacing:-.015em}
+h1 em{font-style:normal;color:var(--acc)}
+p.lead{max-width:34em;font-size:clamp(15px,1.6vw,19px);color:var(--ink);margin:0 0 8px}
+.mut{color:var(--mut)}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px;margin-top:22px}
+.card{background:var(--panel);border:1px solid var(--line);padding:16px 18px}
+.card h3{margin:0 0 6px;font:700 14px/1.3 system-ui;letter-spacing:.01em}
+.card p{margin:0;font-size:13.5px;color:var(--mut)}
+.k{font:600 12px ui-monospace,Menlo,monospace;color:var(--acc)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-top:24px}
+.stat{border-left:3px solid var(--accbg);padding:6px 0 6px 14px}
+.stat b{display:block;font:800 clamp(26px,3.4vw,42px)/1 ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+.stat span{font-size:12.5px;color:var(--mut)}
+.zones{display:flex;gap:4px;margin:26px 0 8px;height:34px}
+.z{flex:1;background:var(--panel);border:1px solid var(--line);position:relative}
+.z.full{background:var(--ok);border-color:var(--ok)}
+.z.wp{background:linear-gradient(90deg,var(--ok) 55%,var(--panel) 55%);border-color:var(--acc)}
+.z.wp:after{content:"";position:absolute;left:55%;top:-6px;bottom:-6px;width:3px;background:var(--accbg)}
+.legend{font:12px ui-monospace,Menlo,monospace;color:var(--mut)}
+.road{list-style:none;margin:18px 0 0;padding:0;display:grid;gap:10px;max-width:46em}
+.road li{display:flex;gap:12px;align-items:baseline;padding:10px 14px;background:var(--panel);border:1px solid var(--line)}
+.tag{font:700 10.5px/1 ui-monospace,Menlo,monospace;letter-spacing:.08em;padding:4px 7px;white-space:nowrap}
+.t-done{background:var(--ok);color:#fff}
+.t-now{background:var(--accbg);color:#231f00}
+.t-next{border:1px solid var(--mut);color:var(--mut)}
+.counter{position:fixed;right:16px;bottom:14px;font:11px ui-monospace,Menlo,monospace;color:var(--mut)}
+code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+</style>
+
+<section class="slide" id="s1">
+  <p class="eyebrow">Slide 1/5 · OpenBSD-src fork · xsub/OpenBSD-src</p>
+  <h1>What is this project for? <em>Native zoned storage for OpenBSD.</em></h1>
+  <p class="lead">Modern high-capacity drives — host-managed SMR and NVMe <b>ZNS</b> — refuse random writes: data may only land on each zone's <em>write pointer</em>. OpenBSD had no native support for them at all.</p>
+  <div class="cols">
+    <div class="card"><h3>ZBD layer</h3><p>A native kernel ABI: zone reports, zone management (reset/finish), a sequential-write safety gate in <span class="k">sd(4)</span>, both SCSI ZBC and NVMe ZNS paths.</p></div>
+    <div class="card"><h3>ZLFS</h3><p>A log-structured filesystem designed <em>from scratch</em> for the zone contract: writes only at write pointers, nothing overwritten, commit = an appended generation-N+1 superblock.</p></div>
+    <div class="card"><h3>Why it matters</h3><p>A research platform and working proof that a full filesystem (directories, rename, GC, concurrency) runs on a device that forbids overwrites. Cheap capacity without a translation layer.</p></div>
+  </div>
+</section>
+
+<section class="slide" id="s2">
+  <p class="eyebrow">Slide 2/5 · Where it stands</p>
+  <h1>It works — and every feature has <em>hardware evidence</em></h1>
+  <p class="lead">Method: implement → multi-agent adversarial verification → push → validate on a QEMU NVMe ZNS VM. The "awaiting evidence" table in <code>functional_testing.md</code> is empty; the architecture is documented in <code>doc/zlfs-design.md</code>.</p>
+  <div class="cols">
+    <div class="card"><h3>Full namespace</h3><p>create / read / write / truncate, mkdir / rmdir, unlink, <b>rename</b> — including directories across parents with subtree-cycle rejection.</p></div>
+    <div class="card"><h3>GC + circular log</h3><p>The cleaner reclaimed ~6.6 GB in one pass (df 98%→18%); 150 zone-fills on a 126-zone device with zero ENOSPC. Superblock zones recycle by ping-pong reset.</p></div>
+    <div class="card"><h3>Per-block commit</h3><p>A 10-byte splice in a 1 MB file rewrites <b>one block</b>, not 250. Files to ~1 GB via double-indirect trees. mmap views stay coherent (UVM invalidation).</p></div>
+    <div class="card"><h3>Concurrency-safe</h3><p>All-or-nothing commits under held vnode locks; trylock + retry avoids the fsync deadlock. Churn and write-path regressions green on the new kernel.</p></div>
+  </div>
+</section>
+
+<section class="slide" id="s3">
+  <p class="eyebrow">Slide 3/5 · Architecture in a nutshell</p>
+  <h1>Never overwrite. <em>Append and switch.</em></h1>
+  <div class="zones" aria-hidden="true">
+    <div class="z full"></div><div class="z full"></div><div class="z full"></div>
+    <div class="z wp"></div><div class="z"></div><div class="z"></div><div class="z"></div>
+  </div>
+  <p class="legend">full zones · log head at the write pointer · empty zones (recycled by GC)</p>
+  <div class="cols">
+    <div class="card"><h3>Superblock = generation log</h3><p>Ping-pong across zones 0–1; the highest valid generation wins at mount. A crash before the append leaves the previous checkpoint in force — the log <em>is</em> the journal, so recovery is just mounting.</p></div>
+    <div class="card"><h3>Checkpoint → map → inodes</h3><p>The checkpoint carries a multi-block inode map (~256k inodes); everything little-endian with CRC32C.</p></div>
+    <div class="card"><h3>GC in 3 passes</h3><p>Liveness = union of the durable checkpoint (re-read from disk), the in-core map, and open vnodes. Only fully dead zones are reset — crash-safe by construction.</p></div>
+  </div>
+</section>
+
+<section class="slide" id="s4">
+  <p class="eyebrow">Slide 4/5 · Numbers (fork point 2026-07-04 → 07-20)</p>
+  <h1>16 days from <em>zero to a working filesystem</em></h1>
+  <div class="stats">
+    <div class="stat"><b>96</b><span>commits above mainline (32 ZLFS-prefixed)</span></div>
+    <div class="stat"><b>10 838</b><span>lines added · 61 files</span></div>
+    <div class="stat"><b>4 230</b><span>lines of ZLFS kernel (sys/zlfs + format)</span></div>
+    <div class="stat"><b>1 774</b><span>lines in sd(4)/NVMe/dkzone (ZBD layer)</span></div>
+    <div class="stat"><b>714</b><span>lines of userland: newfs_zlfs, mount_zlfs</span></div>
+    <div class="stat"><b>14</b><span>regress scripts (5 ZLFS suites, 1 249 lines)</span></div>
+    <div class="stat"><b>18</b><span>defects logged — every one caught before a user could hit it</span></div>
+    <div class="stat"><b>v2</b><span>on-disk format; rebased onto mainline 07-13</span></div>
+  </div>
+  <p class="lead mut" style="margin-top:20px">Best catches: GC liveness diverging from the durable checkpoint (silent data loss), stale buffer cache after zone recycling, truncated bytes resurrected by RMW, stale mmap pages, an fsync that could return success without persisting — all stopped by adversarial review or the VM suite, none by a user.</p>
+</section>
+
+<section class="slide" id="s5">
+  <p class="eyebrow">Slide 5/5 · Roadmap</p>
+  <h1>Where we are, <em>what remains</em></h1>
+  <ul class="road">
+    <li><span class="tag t-done">DONE</span><span>ZBD layer: reports, zone management, write gate, SCSI ZBC + NVMe ZNS</span></li>
+    <li><span class="tag t-done">DONE</span><span>ZLFS: full namespace, durable commits, format v2, mmap coherence</span></li>
+    <li><span class="tag t-done">DONE</span><span>GC: circular allocator + dead-zone cleaner + superblock-zone recycling</span></li>
+    <li><span class="tag t-done">DONE</span><span>Per-block dirty tracking and double-indirect files (to ~1 GB)</span></li>
+    <li><span class="tag t-now">NOW</span><span>Concurrency-safe commit — pushed; churn + write-path regressions green, final regression in flight</span></li>
+    <li><span class="tag t-next">NEXT</span><span>Copying cleaner — compact zones that mix live and dead blocks</span></li>
+    <li><span class="tag t-next">NEXT</span><span>Validation on a physical SMR drive (so far: QEMU NVMe ZNS)</span></li>
+  </ul>
+</section>
+<div class="counter" id="ctr">1 / 5</div>
+<script>
+const slides=[...document.querySelectorAll('.slide')],ctr=document.getElementById('ctr');
+let cur=0;
+const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){cur=slides.indexOf(e.target);ctr.textContent=(cur+1)+' / 5';}})},{threshold:.6});
+slides.forEach(s=>io.observe(s));
+addEventListener('keydown',e=>{
+  if(e.key==='ArrowDown'||e.key==='PageDown'||e.key===' '){e.preventDefault();slides[Math.min(cur+1,4)].scrollIntoView();}
+  if(e.key==='ArrowUp'||e.key==='PageUp'){e.preventDefault();slides[Math.max(cur-1,0)].scrollIntoView();}
+});
+</script>
