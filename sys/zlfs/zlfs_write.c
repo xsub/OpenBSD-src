@@ -72,7 +72,7 @@ zlfs_indir_entry(struct zlfs_mount *zmp, u_int64_t lba, u_int64_t idx,
 
 /*
  * Map a logical block number to its device LBA through the direct,
- * single-indirect, and double-indirect pointers.  Indirect blocks are
+ * single-, double-, and triple-indirect pointers.  Indirect blocks are
  * read through the buffer cache, so repeated lookups stay cheap.
  * An unmapped block yields *lbap = 0.
  */
@@ -82,7 +82,7 @@ zlfs_bmap_read(struct zlfs_node *znp, u_int64_t blkno, u_int64_t *lbap)
 	struct zlfs_mount *zmp = znp->zn_zmp;
 	struct zlfs_inode *zi = &znp->zn_dinode;
 	u_int64_t nindir = ZLFS_NINDIR(zmp);
-	u_int64_t l1;
+	u_int64_t l1, l2;
 	int error;
 
 	if (blkno < ZLFS_NDADDR) {
@@ -98,20 +98,44 @@ zlfs_bmap_read(struct zlfs_node *znp, u_int64_t blkno, u_int64_t *lbap)
 		return zlfs_indir_entry(zmp, zi->zi_ib[0], blkno, lbap);
 	}
 	blkno -= nindir;
-	if (blkno >= nindir * nindir)
-		return EFBIG;		/* beyond double indirect */
-	if (zi->zi_ib[1] == 0) {
+	if (blkno < nindir * nindir) {
+		if (zi->zi_ib[1] == 0) {
+			*lbap = 0;
+			return 0;
+		}
+		error = zlfs_indir_entry(zmp, zi->zi_ib[1], blkno / nindir,
+		    &l1);
+		if (error != 0)
+			return error;
+		if (l1 == 0) {
+			*lbap = 0;
+			return 0;
+		}
+		return zlfs_indir_entry(zmp, l1, blkno % nindir, lbap);
+	}
+	blkno -= nindir * nindir;
+	if (blkno >= nindir * nindir * nindir)
+		return EFBIG;		/* beyond triple indirect */
+	if (zi->zi_ib[2] == 0) {
 		*lbap = 0;
 		return 0;
 	}
-	error = zlfs_indir_entry(zmp, zi->zi_ib[1], blkno / nindir, &l1);
+	error = zlfs_indir_entry(zmp, zi->zi_ib[2], blkno / (nindir * nindir),
+	    &l1);
 	if (error != 0)
 		return error;
 	if (l1 == 0) {
 		*lbap = 0;
 		return 0;
 	}
-	return zlfs_indir_entry(zmp, l1, blkno % nindir, lbap);
+	error = zlfs_indir_entry(zmp, l1, (blkno / nindir) % nindir, &l2);
+	if (error != 0)
+		return error;
+	if (l2 == 0) {
+		*lbap = 0;
+		return 0;
+	}
+	return zlfs_indir_entry(zmp, l2, blkno % nindir, lbap);
 }
 
 /* True if lba is inside [start, end). */
@@ -145,8 +169,9 @@ zlfs_node_owns_range(struct zlfs_node *znp, u_int64_t start, u_int64_t end)
 
 /*
  * Return nonzero if any of the inode's metadata blocks -- its inode
- * block or its indirect blocks (single, and the double tree's L1/L2) --
- * lie in [start, end).  The inode block LBA comes from the in-core map.
+ * block or its indirect blocks (single, the double tree's L1/L2, and
+ * the triple tree's top/mid/leaf) -- lie in [start, end).  The inode
+ * block LBA comes from the in-core map.
  */
 int
 zlfs_node_owns_meta(struct zlfs_node *znp, u_int64_t start, u_int64_t end)
@@ -154,8 +179,8 @@ zlfs_node_owns_meta(struct zlfs_node *znp, u_int64_t start, u_int64_t end)
 	struct zlfs_mount *zmp = znp->zn_zmp;
 	struct zlfs_inode *zi = &znp->zn_dinode;
 	u_int64_t nindir = ZLFS_NINDIR(zmp);
-	struct buf *bp;
-	u_int64_t iblk, j, l1;
+	struct buf *bp, *mbp;
+	u_int64_t iblk, j, k, l1, mid, leaf;
 
 	rw_enter_read(&zmp->zm_lock);
 	iblk = (znp->zn_ino < zmp->zm_ninodes) ?
@@ -167,6 +192,8 @@ zlfs_node_owns_meta(struct zlfs_node *znp, u_int64_t start, u_int64_t end)
 		return 1;
 	if (ZLFS_INRANGE(zi->zi_ib[1], start, end))
 		return 1;
+	if (ZLFS_INRANGE(zi->zi_ib[2], start, end))
+		return 1;
 	if (zi->zi_ib[1] != 0 &&
 	    zlfs_bread_block(zmp, zi->zi_ib[1], &bp) == 0) {
 		for (j = 0; j < nindir; j++) {
@@ -175,6 +202,32 @@ zlfs_node_owns_meta(struct zlfs_node *znp, u_int64_t start, u_int64_t end)
 				brelse(bp);
 				return 1;
 			}
+		}
+		brelse(bp);
+	}
+	if (zi->zi_ib[2] != 0 &&
+	    zlfs_bread_block(zmp, zi->zi_ib[2], &bp) == 0) {
+		for (j = 0; j < nindir; j++) {
+			mid = letoh64(((u_int64_t *)bp->b_data)[j]);
+			if (ZLFS_INRANGE(mid, start, end)) {
+				brelse(bp);
+				return 1;
+			}
+			/* Skip an entry aliasing the held top buffer:
+			 * breading it would self-deadlock (corrupt
+			 * metadata; the GC walk refuses it separately). */
+			if (mid == 0 || mid == zi->zi_ib[2] ||
+			    zlfs_bread_block(zmp, mid, &mbp) != 0)
+				continue;
+			for (k = 0; k < nindir; k++) {
+				leaf = letoh64(((u_int64_t *)mbp->b_data)[k]);
+				if (ZLFS_INRANGE(leaf, start, end)) {
+					brelse(mbp);
+					brelse(bp);
+					return 1;
+				}
+			}
+			brelse(mbp);
 		}
 		brelse(bp);
 	}
@@ -281,15 +334,16 @@ zlfs_dblk_prepare(struct zlfs_node *znp, u_int64_t blkno, int rmw)
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
 	struct buf *bp;
 	u_int8_t **narr;
-	u_int64_t lba;
-	u_int32_t want;
+	u_int64_t lba, want;
 	int error;
 
 	if (blkno >= ZLFS_MAXFILESZ(zmp) / bsize)
 		return EFBIG;
 
 	if (blkno >= znp->zn_ndblk) {
-		/* Grow geometrically: sequential writes stay O(n). */
+		/* Grow geometrically: sequential writes stay O(n).  The
+		 * MAXFILESZ cap above bounds the doubling (no wrap) and
+		 * keeps the resulting array within what malloc(9) serves. */
 		want = 8;
 		while (want < blkno + 1)
 			want <<= 1;
@@ -322,7 +376,26 @@ zlfs_dblk_prepare(struct zlfs_node *znp, u_int64_t blkno, int rmw)
 		}
 		/* No on-disk block: stays zero (a hole being filled). */
 	}
+	znp->zn_dblkcnt++;
 	return 0;
+}
+
+/*
+ * Bound the overlay's memory: once a file holds ZLFS_DBLK_MAXBUFS
+ * materialised buffers, commit so they flush and free before more are
+ * materialised.  Callers hold the vnode lock; the commit recurses
+ * through it exactly like the fsync path (rrwlock, RWL_DUPOK).  The
+ * caller must have already grown zi_size over every materialised
+ * block -- the commit only writes (and the success path only frees)
+ * blocks below the current size, so an uncovered buffer would be
+ * dropped unwritten.
+ */
+int
+zlfs_dblk_backpressure(struct zlfs_node *znp)
+{
+	if (znp->zn_dblkcnt < ZLFS_DBLK_MAXBUFS)
+		return 0;
+	return zlfs_commit(znp->zn_zmp);
 }
 
 /* Free a regular file's dirty-block overlay. */
@@ -341,6 +414,7 @@ zlfs_dblk_free(struct zlfs_node *znp)
 	free(znp->zn_dblk, M_ZLFS, znp->zn_ndblk * sizeof(*znp->zn_dblk));
 	znp->zn_dblk = NULL;
 	znp->zn_ndblk = 0;
+	znp->zn_dblkcnt = 0;
 }
 
 /* Load a whole indirect block of little-endian LBAs into dst. */
@@ -361,36 +435,40 @@ zlfs_load_entries(struct zlfs_mount *zmp, u_int64_t lba, u_int64_t *dst)
 }
 
 /*
- * Lazily materialise the host-endian entry table for L2 slot `slot` of
- * the double-indirect tree, loading its current contents when the slot
- * already has an on-disk block.
+ * Lazily materialise a host-endian entry table for one indirect block,
+ * loading its current contents when the block already exists on disk
+ * (src_lba != 0).  Used for the double tree's L2 blocks and the triple
+ * tree's mid and leaf blocks alike.
  */
 static int
-zlfs_l2_get(struct zlfs_mount *zmp, const u_int64_t *l1ent,
-    u_int64_t **l2tab, u_int64_t slot)
+zlfs_tab_get(struct zlfs_mount *zmp, u_int64_t src_lba, u_int64_t **tabp)
 {
 	u_int64_t nindir = ZLFS_NINDIR(zmp);
-	int error;
 
-	if (l2tab[slot] != NULL)
+	if (*tabp != NULL)
 		return 0;
-	l2tab[slot] = mallocarray(nindir, sizeof(u_int64_t), M_ZLFS,
+	*tabp = mallocarray(nindir, sizeof(u_int64_t), M_ZLFS,
 	    M_WAITOK | M_ZERO);
-	if (l1ent[slot] != 0) {
-		error = zlfs_load_entries(zmp, l1ent[slot], l2tab[slot]);
-		if (error != 0)
-			return error;
-	}
+	if (src_lba != 0)
+		return zlfs_load_entries(zmp, src_lba, *tabp);
 	return 0;
 }
 
 /*
  * Commit a regular file's dirty blocks: write each overlay buffer to a
  * fresh LBA, keep the LBAs of clean blocks, and rebuild an indirect
- * block (single, or an L2/L1 of the double tree) only when an entry in
- * its range changed.  Works on a local copy of the inode so a failure
- * leaves the in-core inode and the dirty overlay untouched (the retry
- * re-runs from intact state; partial writes are unreferenced garbage).
+ * block (single, the double tree's L2/L1, or the triple tree's
+ * leaf/mid/top) only when an entry in its range changed.  Works on a
+ * local copy of the inode so a failure leaves the in-core inode and the
+ * dirty overlay untouched (the retry re-runs from intact state; partial
+ * writes are unreferenced garbage).
+ *
+ * The triple tree hangs off zi_ib[2]: the top block's entries name mid
+ * blocks (each covering nindir^2 data blocks), a mid block's entries
+ * name leaf blocks, and a leaf block's entries name data blocks.  Leaf
+ * tables are indexed globally (0 .. nleaf-1 across the whole valid
+ * triple range) and materialised lazily, so only the leaves an actual
+ * dirty block or boundary touches ever occupy memory.
  */
 static int
 zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
@@ -398,16 +476,25 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 	struct zlfs_inode di = znp->zn_dinode;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
 	u_int64_t nindir = ZLFS_NINDIR(zmp);
+	u_int64_t nindir2 = nindir * nindir;
 	u_int64_t nblocks = howmany(di.zi_size, bsize);
-	u_int64_t dvalid = (nblocks > ZLFS_NDADDR + nindir) ?
-	    nblocks - ZLFS_NDADDR - nindir : 0;
-	u_int64_t *sient, *l1ent, **l2tab;
-	u_int8_t *l2mod, *blk;
-	u_int64_t b, i, lba, idx, slot;
-	int error = 0, s_dirty = 0, l1_dirty = 0;
+	u_int64_t dvalid, tvalid, nleaf;
+	u_int64_t *sient, *l1ent, **l2tab, *tent, **mtab, **ltab = NULL;
+	u_int8_t *l2mod, *mmod, *lmod = NULL, *blk;
+	u_int64_t b, i, lba, idx, tidx, slot, lf;
+	int error = 0, s_dirty = 0, l1_dirty = 0, t_dirty = 0;
 
-	if (nblocks > ZLFS_NDADDR + nindir + nindir * nindir)
+	if (nblocks > ZLFS_NDADDR + nindir + nindir2 + nindir2 * nindir)
 		return EFBIG;
+
+	/* Blocks held by the double tree (capped), then by the triple. */
+	dvalid = (nblocks > ZLFS_NDADDR + nindir) ?
+	    nblocks - ZLFS_NDADDR - nindir : 0;
+	if (dvalid > nindir2)
+		dvalid = nindir2;
+	tvalid = (nblocks > ZLFS_NDADDR + nindir + nindir2) ?
+	    nblocks - ZLFS_NDADDR - nindir - nindir2 : 0;
+	nleaf = howmany(tvalid, nindir);
 
 	sient = mallocarray(nindir, sizeof(u_int64_t), M_ZLFS,
 	    M_WAITOK | M_ZERO);
@@ -416,6 +503,16 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 	l2tab = mallocarray(nindir, sizeof(u_int64_t *), M_ZLFS,
 	    M_WAITOK | M_ZERO);
 	l2mod = malloc(nindir, M_ZLFS, M_WAITOK | M_ZERO);
+	tent = mallocarray(nindir, sizeof(u_int64_t), M_ZLFS,
+	    M_WAITOK | M_ZERO);
+	mtab = mallocarray(nindir, sizeof(u_int64_t *), M_ZLFS,
+	    M_WAITOK | M_ZERO);
+	mmod = malloc(nindir, M_ZLFS, M_WAITOK | M_ZERO);
+	if (nleaf > 0) {
+		ltab = mallocarray(nleaf, sizeof(u_int64_t *), M_ZLFS,
+		    M_WAITOK | M_ZERO);
+		lmod = malloc(nleaf, M_ZLFS, M_WAITOK | M_ZERO);
+	}
 	blk = malloc(bsize, M_ZLFS, M_WAITOK | M_ZERO);
 
 	/* Current entry tables (host-endian), if the file has them. */
@@ -424,6 +521,9 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 		goto out;
 	if (di.zi_ib[1] != 0 &&
 	    (error = zlfs_load_entries(zmp, di.zi_ib[1], l1ent)) != 0)
+		goto out;
+	if (di.zi_ib[2] != 0 &&
+	    (error = zlfs_load_entries(zmp, di.zi_ib[2], tent)) != 0)
 		goto out;
 
 	/* Dirty blocks inside the file get fresh LBAs. */
@@ -441,14 +541,26 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 		} else if (b < ZLFS_NDADDR + nindir) {
 			sient[b - ZLFS_NDADDR] = lba;
 			s_dirty = 1;
-		} else {
-			idx = b - ZLFS_NDADDR - nindir;
+		} else if ((idx = b - ZLFS_NDADDR - nindir) < nindir2) {
 			slot = idx / nindir;
-			error = zlfs_l2_get(zmp, l1ent, l2tab, slot);
+			error = zlfs_tab_get(zmp, l1ent[slot], &l2tab[slot]);
 			if (error != 0)
 				goto out;
 			l2tab[slot][idx % nindir] = lba;
 			l2mod[slot] = 1;
+		} else {
+			tidx = idx - nindir2;
+			lf = tidx / nindir;
+			slot = tidx / nindir2;
+			error = zlfs_tab_get(zmp, tent[slot], &mtab[slot]);
+			if (error != 0)
+				goto out;
+			error = zlfs_tab_get(zmp, mtab[slot][lf % nindir],
+			    &ltab[lf]);
+			if (error != 0)
+				goto out;
+			ltab[lf][tidx % nindir] = lba;
+			lmod[lf] = 1;
 		}
 	}
 
@@ -470,13 +582,47 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 	}
 	if (dvalid % nindir != 0) {
 		slot = dvalid / nindir;
-		error = zlfs_l2_get(zmp, l1ent, l2tab, slot);
+		error = zlfs_tab_get(zmp, l1ent[slot], &l2tab[slot]);
 		if (error != 0)
 			goto out;
 		for (i = dvalid % nindir; i < nindir; i++) {
 			if (l2tab[slot][i] != 0) {
 				l2tab[slot][i] = 0;
 				l2mod[slot] = 1;
+			}
+		}
+	}
+	for (slot = howmany(tvalid, nindir2); slot < nindir; slot++) {
+		if (tent[slot] != 0) {
+			tent[slot] = 0;		/* whole mid subtree orphaned */
+			t_dirty = 1;
+		}
+	}
+	if (tvalid % nindir2 != 0) {
+		slot = tvalid / nindir2;
+		error = zlfs_tab_get(zmp, tent[slot], &mtab[slot]);
+		if (error != 0)
+			goto out;
+		for (i = howmany(tvalid % nindir2, nindir); i < nindir; i++) {
+			if (mtab[slot][i] != 0) {
+				mtab[slot][i] = 0; /* whole leaf orphaned */
+				mmod[slot] = 1;
+			}
+		}
+	}
+	if (tvalid % nindir != 0) {
+		lf = tvalid / nindir;
+		slot = lf / nindir;
+		error = zlfs_tab_get(zmp, tent[slot], &mtab[slot]);
+		if (error != 0)
+			goto out;
+		error = zlfs_tab_get(zmp, mtab[slot][lf % nindir], &ltab[lf]);
+		if (error != 0)
+			goto out;
+		for (i = tvalid % nindir; i < nindir; i++) {
+			if (ltab[lf][i] != 0) {
+				ltab[lf][i] = 0;
+				lmod[lf] = 1;
 			}
 		}
 	}
@@ -489,10 +635,21 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 		if (nblocks > ZLFS_NDADDR)
 			s_dirty = 1;		/* rewrite single indirect */
 		for (slot = 0; slot < howmany(dvalid, nindir); slot++) {
-			error = zlfs_l2_get(zmp, l1ent, l2tab, slot);
+			error = zlfs_tab_get(zmp, l1ent[slot], &l2tab[slot]);
 			if (error != 0)
 				goto out;
 			l2mod[slot] = 1;	/* rewrite this L2 (and L1) */
+		}
+		for (lf = 0; lf < nleaf; lf++) {
+			slot = lf / nindir;
+			error = zlfs_tab_get(zmp, tent[slot], &mtab[slot]);
+			if (error != 0)
+				goto out;
+			error = zlfs_tab_get(zmp, mtab[slot][lf % nindir],
+			    &ltab[lf]);
+			if (error != 0)
+				goto out;
+			lmod[lf] = 1;	/* rewrite this leaf (mid, top follow) */
 		}
 	}
 
@@ -542,6 +699,57 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 		di.zi_ib[1] = lba;
 	}
 
+	/* Modified leaf blocks get fresh LBAs, recorded in their mid. */
+	for (lf = 0; lf < nleaf; lf++) {
+		if (!lmod[lf])
+			continue;
+		slot = lf / nindir;
+		error = zlfs_tab_get(zmp, tent[slot], &mtab[slot]);
+		if (error != 0)
+			goto out;
+		for (i = 0; i < nindir; i++)
+			((u_int64_t *)blk)[i] = htole64(ltab[lf][i]);
+		error = zlfs_alloc_block(zmp, &lba);
+		if (error != 0)
+			goto out;
+		error = zlfs_write_block(zmp, lba, blk);
+		if (error != 0)
+			goto out;
+		mtab[slot][lf % nindir] = lba;
+		mmod[slot] = 1;
+	}
+
+	/* Modified mid blocks get fresh LBAs, recorded in the top table. */
+	for (slot = 0; slot < nindir; slot++) {
+		if (!mmod[slot])
+			continue;
+		for (i = 0; i < nindir; i++)
+			((u_int64_t *)blk)[i] = htole64(mtab[slot][i]);
+		error = zlfs_alloc_block(zmp, &lba);
+		if (error != 0)
+			goto out;
+		error = zlfs_write_block(zmp, lba, blk);
+		if (error != 0)
+			goto out;
+		tent[slot] = lba;
+		t_dirty = 1;
+	}
+
+	/* The triple-indirect top block. */
+	if (tvalid == 0) {
+		di.zi_ib[2] = 0;
+	} else if (t_dirty || di.zi_ib[2] == 0) {
+		for (i = 0; i < nindir; i++)
+			((u_int64_t *)blk)[i] = htole64(tent[i]);
+		error = zlfs_alloc_block(zmp, &lba);
+		if (error != 0)
+			goto out;
+		error = zlfs_write_block(zmp, lba, blk);
+		if (error != 0)
+			goto out;
+		di.zi_ib[2] = lba;
+	}
+
 	/*
 	 * Block count by arithmetic: the no-holes invariant (gaps are
 	 * materialised as zero blocks) means every block below the size
@@ -552,6 +760,9 @@ zlfs_commit_file_blocks(struct zlfs_mount *zmp, struct zlfs_node *znp)
 		di.zi_blocks++;				/* single indirect */
 	if (dvalid > 0)
 		di.zi_blocks += 1 + howmany(dvalid, nindir); /* L1 + L2s */
+	if (tvalid > 0)
+		di.zi_blocks += 1 + howmany(tvalid, nindir2) + nleaf;
+						/* top + mids + leaves */
 
 	/* Success: adopt the new pointers, drop the overlay. */
 	znp->zn_dinode = di;
@@ -562,7 +773,19 @@ out:
 		if (l2tab[slot] != NULL)
 			free(l2tab[slot], M_ZLFS,
 			    nindir * sizeof(u_int64_t));
+		if (mtab[slot] != NULL)
+			free(mtab[slot], M_ZLFS,
+			    nindir * sizeof(u_int64_t));
 	}
+	for (lf = 0; lf < nleaf; lf++) {
+		if (ltab[lf] != NULL)
+			free(ltab[lf], M_ZLFS, nindir * sizeof(u_int64_t));
+	}
+	free(ltab, M_ZLFS, nleaf * sizeof(u_int64_t *));
+	free(lmod, M_ZLFS, nleaf);
+	free(mtab, M_ZLFS, nindir * sizeof(u_int64_t *));
+	free(mmod, M_ZLFS, nindir);
+	free(tent, M_ZLFS, nindir * sizeof(u_int64_t));
 	free(l2tab, M_ZLFS, nindir * sizeof(u_int64_t *));
 	free(l2mod, M_ZLFS, nindir);
 	free(l1ent, M_ZLFS, nindir * sizeof(u_int64_t));
@@ -884,6 +1107,8 @@ zlfs_commit(struct zlfs_mount *zmp)
 		need = 1 + howmany(zmp->zm_ninodes,
 		    bsize / sizeof(u_int64_t));
 		for (di2 = 0; di2 < nd; di2++) {
+			u_int64_t nindir = ZLFS_NINDIR(zmp);
+			u_int64_t fnb, fdv, ftv;
 			u_int32_t b;
 
 			znp = dnodes[di2];
@@ -893,14 +1118,33 @@ zlfs_commit(struct zlfs_mount *zmp)
 				continue;
 			}
 			/*
-			 * File: its dirty blocks, worst case one L2 block
-			 * per dirty block, plus L1 + single-indirect +
-			 * inode.
+			 * File: one write per dirty data block plus, worst
+			 * case (compaction relocation via zn_relocate, or a
+			 * bare shrink), a fresh copy of EVERY indirect
+			 * block the file's size implies, plus the inode
+			 * block.  Anything less lets a forced full-tree
+			 * rewrite start without the cleaner having run and
+			 * die mid-commit on ENOSPC -- and, with the flags
+			 * only cleared on success, retry forever.
 			 */
-			need += 3;
+			fnb = howmany(znp->zn_dinode.zi_size, bsize);
+			fdv = (fnb > ZLFS_NDADDR + nindir) ?
+			    fnb - ZLFS_NDADDR - nindir : 0;
+			if (fdv > nindir * nindir)
+				fdv = nindir * nindir;
+			ftv = (fnb > ZLFS_NDADDR + nindir + nindir * nindir) ?
+			    fnb - ZLFS_NDADDR - nindir - nindir * nindir : 0;
+			need += 1;				/* inode */
+			if (fnb > ZLFS_NDADDR)
+				need += 1;			/* single */
+			if (fdv > 0)
+				need += 1 + howmany(fdv, nindir); /* L1+L2s */
+			if (ftv > 0)
+				need += 1 + howmany(ftv, nindir * nindir) +
+				    howmany(ftv, nindir); /* top+mids+leaves */
 			for (b = 0; b < znp->zn_ndblk; b++) {
 				if (znp->zn_dblk[b] != NULL)
-					need += 2;
+					need += 1;
 			}
 		}
 		headfree = (zmp->zm_log_zend - zmp->zm_log_lba) / bpb;

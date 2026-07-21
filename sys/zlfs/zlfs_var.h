@@ -83,6 +83,7 @@ struct zlfs_node {
 	 */
 	u_int8_t	**zn_dblk;	/* dirty block buffers, or NULL */
 	u_int32_t	 zn_ndblk;	/* slots in zn_dblk */
+	u_int32_t	 zn_dblkcnt;	/* materialised (non-NULL) buffers */
 	int		 zn_relocate;	/* GC: rewrite indirect blocks even
 					   if unchanged, to move them off a
 					   zone being compacted */
@@ -99,14 +100,37 @@ struct zlfs_node {
 	    ((zmp)->zm_super.zs_block_size / sizeof(u_int64_t)))
 
 /*
- * Largest file the write path supports: the direct blocks, one
- * single-indirect block, and one double-indirect tree (about 1 GB at
- * a 4 KB block size).  Triple indirect stays reserved.
+ * Largest file the ON-DISK FORMAT supports: the direct blocks, one
+ * single-indirect block, one double-indirect tree, and one
+ * triple-indirect tree (about 513 GB at a 4 KB block size).
  */
-#define ZLFS_MAXFILESZ(zmp) \
+#define ZLFS_TREEMAXSZ(zmp) \
 	((ZLFS_NDADDR + ZLFS_NINDIR(zmp) + \
-	    ZLFS_NINDIR(zmp) * ZLFS_NINDIR(zmp)) * \
+	    ZLFS_NINDIR(zmp) * ZLFS_NINDIR(zmp) + \
+	    ZLFS_NINDIR(zmp) * ZLFS_NINDIR(zmp) * ZLFS_NINDIR(zmp)) * \
 	    (u_int64_t)(zmp)->zm_super.zs_block_size)
+
+/*
+ * Largest file the WRITE PATH admits.  The dirty overlay indexes
+ * blocks with a dense pointer array sized to the highest dirty block
+ * number, so writable size is bounded by what malloc(9) can serve for
+ * that index, not by the format: at the format bound the index alone
+ * would need a ~1 GB allocation.  16 GB keeps the worst-case index at
+ * 32 MiB (4 KB blocks) and stays far beyond any tested device.  Reads
+ * and the GC walk the full format regardless of this cap; a file
+ * beyond it (foreign writer) is readable and shrinkable but is
+ * skipped by the compactor.
+ *
+ * The overlay BUFFERS are bounded separately: once a file holds
+ * ZLFS_DBLK_MAXBUFS materialised blocks (64 MB at 4 KB) the write and
+ * truncate paths commit before materialising more, so a large write
+ * or truncate-up streams through bounded memory instead of buffering
+ * everything (gap blocks included) in core.
+ */
+#define ZLFS_MAXFILESZ_CAP	(16ULL << 30)
+#define ZLFS_MAXFILESZ(zmp) \
+	MIN(ZLFS_TREEMAXSZ(zmp), ZLFS_MAXFILESZ_CAP)
+#define ZLFS_DBLK_MAXBUFS	16384
 
 /*
  * Directories are committed through the whole-contents (zn_data) path,
@@ -174,6 +198,7 @@ int		zlfs_node_owns_range(struct zlfs_node *, u_int64_t, u_int64_t);
 int		zlfs_node_owns_meta(struct zlfs_node *, u_int64_t, u_int64_t);
 int		zlfs_node_resize(struct zlfs_node *, size_t);
 int		zlfs_dblk_prepare(struct zlfs_node *, u_int64_t, int);
+int		zlfs_dblk_backpressure(struct zlfs_node *);
 void		zlfs_dblk_free(struct zlfs_node *);
 void		zlfs_node_dirty(struct zlfs_node *);
 int		zlfs_commit(struct zlfs_mount *);

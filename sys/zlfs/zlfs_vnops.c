@@ -429,10 +429,21 @@ zlfs_setattr(void *v)
 
 		if (newsize > oldsize) {
 			/* Materialise the new blocks as zeroes (no holes).
-			 * The old EOF block's tail is zero by invariant. */
+			 * The old EOF block's tail is zero by invariant.
+			 * zi_size grows with each block and the node is
+			 * dirtied as we go, so the backpressure commit can
+			 * flush and free the buffers already materialised --
+			 * a large truncate-up streams through bounded
+			 * memory instead of buffering the whole gap. */
 			for (b = howmany(oldsize, bsize);
 			    b < howmany(newsize, bsize); b++) {
 				error = zlfs_dblk_prepare(znp, b, 0);
+				if (error != 0)
+					return error;
+				znp->zn_dinode.zi_size = MIN(
+				    (b + 1) * (u_int64_t)bsize, newsize);
+				zlfs_node_dirty(znp);
+				error = zlfs_dblk_backpressure(znp);
 				if (error != 0)
 					return error;
 			}
@@ -443,6 +454,7 @@ zlfs_setattr(void *v)
 				if (znp->zn_dblk[b] != NULL) {
 					free(znp->zn_dblk[b], M_ZLFS, bsize);
 					znp->zn_dblk[b] = NULL;
+					znp->zn_dblkcnt--;
 				}
 			}
 			/*
@@ -471,7 +483,8 @@ zlfs_setattr(void *v)
 /*
  * Read regular-file data block by block: a block with a dirty overlay
  * buffer is served from it, everything else from disk through
- * zlfs_bmap_read (direct, single- and double-indirect pointers).
+ * zlfs_bmap_read (direct, single-, double- and triple-indirect
+ * pointers).
  */
 int
 zlfs_read(void *v)
@@ -547,7 +560,7 @@ zlfs_write(void *v)
 	struct zlfs_node *znp = VTOZ(vp);
 	struct zlfs_mount *zmp = znp->zn_zmp;
 	u_int32_t bsize = zmp->zm_super.zs_block_size;
-	u_int64_t off, end, oldsize, b, first, last, boff;
+	u_int64_t off, end, oldsize, b, first, last, boff, bend;
 	u_int64_t maxsz = ZLFS_MAXFILESZ(zmp);
 	size_t n, seg;
 	int error, rmw;
@@ -569,12 +582,23 @@ zlfs_write(void *v)
 	end = off + n;
 	oldsize = znp->zn_dinode.zi_size;
 
-	/* Materialise any gap between the old end and the write start. */
+	/* Materialise any gap between the old end and the write start,
+	 * growing zi_size as we go so the backpressure commit can flush
+	 * the zero blocks already materialised (a huge seek-write streams
+	 * through bounded memory). */
 	if (off > oldsize) {
 		for (b = oldsize / bsize; b < off / bsize; b++) {
 			/* Only the old EOF block holds live data. */
 			error = zlfs_dblk_prepare(znp, b,
 			    b * (u_int64_t)bsize < oldsize);
+			if (error != 0)
+				return error;
+			if ((b + 1) * (u_int64_t)bsize >
+			    znp->zn_dinode.zi_size)
+				znp->zn_dinode.zi_size =
+				    (b + 1) * (u_int64_t)bsize;
+			zlfs_node_dirty(znp);
+			error = zlfs_dblk_backpressure(znp);
 			if (error != 0)
 				return error;
 		}
@@ -600,6 +624,16 @@ zlfs_write(void *v)
 		boff = (b == first) ? off % bsize : 0;
 		seg = MIN((u_int64_t)bsize - boff, end - (b * bsize + boff));
 		error = uiomove(znp->zn_dblk[b] + boff, seg, uio);
+		if (error != 0)
+			goto out;
+		/* Grow zi_size over what this block now holds, then let
+		 * the backpressure commit flush a bloated overlay -- the
+		 * commit writes and frees only blocks under the current
+		 * size, so the size must lead the flush. */
+		bend = MIN(end, (b + 1) * (u_int64_t)bsize);
+		if (bend > znp->zn_dinode.zi_size)
+			znp->zn_dinode.zi_size = bend;
+		error = zlfs_dblk_backpressure(znp);
 		if (error != 0)
 			goto out;
 	}
