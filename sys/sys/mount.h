@@ -274,6 +274,9 @@ struct zlfs_args {
 					   to this many superblocks so zone
 					   recycling is exercisable quickly
 					   (0 = full zone capacity) */
+	int	za_faultpoint;		/* TEST: simulate a power cut at
+					   this commit stage (1-4, see
+					   ZLFS_FAULT_*; 0 = off) */
 };
 
 /* per-filesystem mount options */

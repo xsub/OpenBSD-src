@@ -419,6 +419,8 @@ zlfs_setattr(void *v)
 
 	if (zmp->zm_rdonly)
 		return EROFS;
+	if (zmp->zm_dead && vap->va_size != VNOVAL)
+		return EIO;	/* TEST: powered off; a grow only eats RAM */
 	if (vap->va_size != VNOVAL) {
 		if (vp->v_type != VREG)
 			return EISDIR;
@@ -567,6 +569,8 @@ zlfs_write(void *v)
 
 	if (zmp->zm_rdonly)
 		return EROFS;
+	if (zmp->zm_dead)
+		return EIO;	/* TEST: powered off; writes only eat RAM */
 	if (vp->v_type != VREG)
 		return EOPNOTSUPP;
 	if (ap->a_ioflag & IO_APPEND)

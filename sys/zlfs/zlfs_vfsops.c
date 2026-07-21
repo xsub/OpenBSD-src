@@ -228,6 +228,19 @@ zlfs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p,
 		}
 	}
 
+	/*
+	 * Test hook: arm a simulated power cut at one commit stage (see
+	 * ZLFS_FAULT_*).  When it fires the mount goes dead -- no write
+	 * reaches the device anymore -- and a clean remount plays the
+	 * crash-recovery path the stage models.
+	 */
+	if (args->za_faultpoint >= ZLFS_FAULT_SEG &&
+	    args->za_faultpoint <= ZLFS_FAULT_AFTER) {
+		zmp->zm_faultpoint = args->za_faultpoint;
+		printf("zlfs: TEST faultpoint %d armed (commit will "
+		    "simulate power loss)\n", args->za_faultpoint);
+	}
+
 	zmp->zm_mountp = mp;
 	zmp->zm_ctime = gettime();
 
@@ -363,6 +376,8 @@ zlfs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred,
 
 	if (zmp->zm_rdonly)
 		return 0;
+	if (zmp->zm_dead)
+		return 0;	/* TEST: powered off; nothing syncs anymore */
 	/*
 	 * When whole-zone reclamation can no longer keep the log fed
 	 * (free zones are scarce because the written zones are a mix of

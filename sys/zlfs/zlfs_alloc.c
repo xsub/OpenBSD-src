@@ -404,6 +404,8 @@ zlfs_clean(struct zlfs_mount *zmp)
 	u_int64_t i;
 	int error, nreset = 0;
 
+	if (zmp->zm_dead)
+		return;		/* TEST: powered off; no resets either */
 	if (zlfs_gc_mark_all(zmp) != 0)
 		return;
 
@@ -561,6 +563,8 @@ zlfs_compact(struct zlfs_mount *zmp)
 	struct zlfs_zone_state *zst;
 	u_int64_t i, victim = 0, best = 0;
 
+	if (zmp->zm_dead)
+		return EIO;	/* TEST: powered off */
 	if (zlfs_gc_mark_all(zmp) != 0)
 		return EIO;
 
@@ -602,7 +606,22 @@ zlfs_log_init(struct zlfs_mount *zmp, const struct dk_zone *sbz)
 	zmp->zm_sb_zcap = zmp->zm_super.zs_zone_cap_lba;
 	if (zmp->zm_sb_zidx < 0 || zmp->zm_sb_zidx >= ZLFS_SB_ZONES)
 		return EINVAL;
-	zmp->zm_sb_lba = zmp->zm_zones[zmp->zm_sb_zidx].zst_wp_lba;
+	/*
+	 * A power cut can leave a torn (partial-block) append at the SB
+	 * zone's write pointer.  Appends must land at the device write
+	 * pointer AND at block stride (discovery scans block-aligned
+	 * entries from the zone start), so an unaligned head can never
+	 * be appended to again: declare the zone full and let the next
+	 * commit ping-pong to the other zone -- the switch resets it,
+	 * realigning everything.  The live superblock in the torn zone
+	 * stays where discovery found it.
+	 */
+	if ((zmp->zm_zones[zmp->zm_sb_zidx].zst_wp_lba -
+	    zmp->zm_sb_zstart[zmp->zm_sb_zidx]) % bpb != 0)
+		zmp->zm_sb_lba = zmp->zm_sb_zstart[zmp->zm_sb_zidx] +
+		    zmp->zm_sb_zcap;
+	else
+		zmp->zm_sb_lba = zmp->zm_zones[zmp->zm_sb_zidx].zst_wp_lba;
 
 	/*
 	 * Find the data-log head.  The log is circular, so after a wrap
@@ -617,9 +636,15 @@ zlfs_log_init(struct zlfs_mount *zmp, const struct dk_zone *sbz)
 		/*
 		 * The in-range bound also rejects degraded zones the
 		 * device reports with an invalid (all-ones) write pointer.
+		 * A torn (block-unaligned) write pointer disqualifies the
+		 * zone as the head too: block appends must land at the
+		 * device write pointer, which an aligned head requires.
+		 * The zone's earlier, aligned blocks stay readable and
+		 * the cleaner reclaims it like any written zone.
 		 */
 		if (zst->zst_wp_lba > zst->zst_start_lba &&
 		    zst->zst_wp_lba < zst->zst_start_lba + zst->zst_cap_lba &&
+		    (zst->zst_wp_lba - zst->zst_start_lba) % bpb == 0 &&
 		    zst->zst_start_lba + zst->zst_cap_lba -
 		    zst->zst_wp_lba >= bpb) {
 			zmp->zm_log_zidx = i;
