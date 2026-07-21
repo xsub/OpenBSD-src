@@ -116,8 +116,14 @@ resets any written data zone reached by none:
 3. **Open vnodes**: unlinked-but-open files live in neither map.
 
 Any read failure aborts the scan (reclaim nothing).  The log head is
-never reset while it has room.  Only fully dead zones are reclaimed —
-compacting mixed zones (a copying cleaner) is future work.  After any
+never reset while it has room.  Fully dead zones are reset directly;
+mixed zones go through the **copying cleaner**: when free zones run
+low, the sync path (which holds no vnode locks) picks the least-live
+written zone and pulls every live data block owned by any inode into
+that inode's dirty overlay, marking inodes whose *metadata* sits in
+the victim for a full indirect-tree rewrite (`zn_relocate`) — so the
+next commit relocates everything, the zone goes dead, and a later
+pass resets it.  After any
 reset the device buffer cache is purged (`vinvalbuf`): ZLFS writes
 bypass the cache, and reset+reuse is the only way an LBA's contents
 change, so this single invalidation point keeps cached reads coherent.
