@@ -43,11 +43,12 @@ p.lead{max-width:34em;font-size:clamp(15px,1.6vw,19px);color:var(--ink);margin:0
 .t-next{border:1px solid var(--mut);color:var(--mut)}
 .counter{position:fixed;right:16px;bottom:14px;font:11px ui-monospace,Menlo,monospace;color:var(--mut)}
 code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
+a{color:var(--acc);text-underline-offset:3px}
 @media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
 </style>
 
 <section class="slide" id="s1">
-  <p class="eyebrow">Slide 1/5 · OpenBSD-src fork · xsub/OpenBSD-src</p>
+  <p class="eyebrow">Slide 1/5 · OpenBSD-src fork · <a href="https://github.com/xsub/OpenBSD-src">github.com/xsub/OpenBSD-src</a></p>
   <h1>What is this project for? <em>Native zoned storage for OpenBSD.</em></h1>
   <p class="lead">Modern high-capacity drives — host-managed SMR and NVMe <b>ZNS</b> — refuse random writes: data may only land on each zone's <em>write pointer</em>. OpenBSD had no native support for them at all.</p>
   <div class="cols">
@@ -116,6 +117,7 @@ code{font:500 .92em ui-monospace,Menlo,monospace;color:var(--acc)}
     <li><span class="tag t-next">BEYOND</span><span>POSIX gaps — symlinks, hard links, advisory locking (flock/lockf)</span></li>
     <li><span class="tag t-next">BEYOND</span><span>Validation on a physical SMR drive (so far: QEMU NVMe ZNS)</span></li>
   </ul>
+  <p class="legend" style="margin-top:20px">Code, docs &amp; tests: <a href="https://github.com/xsub/OpenBSD-src">github.com/xsub/OpenBSD-src</a> · evidence log: <a href="https://github.com/xsub/OpenBSD-src/blob/main/functional_testing.md">functional_testing.md</a></p>
 </section>
 <div class="counter" id="ctr">1 / 5</div>
 <script>

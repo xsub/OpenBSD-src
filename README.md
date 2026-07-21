@@ -407,13 +407,14 @@ Kernel (`sys/zlfs/`):
   per-zone allocator state, all validated against device geometry with
   every on-disk field bounded before use.
 - Read: a per-mount vnode cache, `lookup`/`readdir`/`read` over on-disk
-  inodes, directories, and both direct and single-indirect data blocks.
+  inodes, directories, and data blocks through the direct, single- and
+  double-indirect pointers.
 - Write: a raw zoned-write primitive (`dk_zone_write_kern`, a direct
   `WRITE(16)` bypassing the buffer cache and the host-managed write gate),
   an append-only log allocator, and `create`/`write`/`fsync`/truncate,
-  `mkdir`/`rmdir`, `unlink`, and `rename`.  Regular files grow past the
-  twelve direct blocks through a single indirect block, and the in-core
-  file buffer grows on demand rather than reserving the maximum up front.
+  `mkdir`/`rmdir`, `unlink`, and `rename`.  Regular files reach ~1 GB
+  through single- and double-indirect trees, and writes land in a sparse
+  per-block dirty overlay rather than a whole-file buffer.
   Directories nest: `..` resolves to the real parent, directory link
   counts track subdirectories, and `rename` reparents `..` (rejecting a
   move of a directory into its own subtree).  A commit flushes all dirty inodes as a
@@ -432,32 +433,32 @@ Kernel (`sys/zlfs/`):
   the durable checkpoint (re-read from disk, not trusted from memory),
   from the in-core inode map, and from in-core vnodes (covering
   unlinked-but-open files), then resets any written zone reachable from
-  none of them.  Only fully dead zones are reclaimed, and any read
-  failure aborts the scan without reclaiming, so a crash at any point
-  still recovers everything the durable checkpoint references.
+  none of them.  Fully dead zones are reset; mixed zones are compacted —
+  the sync path relocates their live blocks through the dirty overlay so
+  the zone goes dead and a later pass resets it.  Any read failure
+  aborts the scan without reclaiming, so a crash at any point still
+  recovers everything the durable checkpoint references.
 
 Current limitations (documented in the code; each is a natural next step):
 
-- Single indirect block only: files are capped at
-  `ZLFS_NDADDR + block_size/8` blocks (about 2 MB at a 4 KB block size);
-  no double or triple indirect blocks yet.
-- Each open file or directory is buffered whole in core, so the maximum
-  file size is also bounded by available memory; there is no block-level
-  buffer-cache integration.
-- The cleaner reclaims only fully dead zones; zones holding a mix of
-  live and superseded blocks are not compacted (a copying cleaner is
-  future work), so space in mixed zones is reclaimed only once
-  everything in them is superseded.
+- Files are capped at ~1 GB (direct + single- + double-indirect);
+  triple-indirect support is implemented and awaiting VM validation on
+  the `zlfs-f1-tripleind` branch.
+- Directories are rewritten whole on commit and capped at
+  `(12 + block_size/8) * block_size` (about 2 MB at a 4 KB block size).
 - Reads go through the buffer cache.  This is coherent with the raw
   zoned writes because the log never overwrites a live LBA; the cache
   is purged whenever a zone reset makes cached blocks stale.
-- The commit path is not yet safe against concurrent vnode operations.
+- Special files, symlinks, hard links, and advisory locks are not
+  implemented (`EOPNOTSUPP`).
 
-Remaining sequence toward a general-purpose filesystem:
-
-1. Double/triple indirect blocks (files past ~2 MB).
-2. A copying cleaner (compact mixed live/dead zones).
-3. Concurrency-safe commit.
+The original bring-up roadmap — indirect blocks, per-block commit, the
+copying cleaner, and the concurrency-safe commit — is complete and
+VM-validated (see `functional_testing.md`).  Work beyond it lives on
+stacked branches awaiting incremental VM validation: `zlfs-f1-tripleind`
+(triple-indirect blocks), `zlfs-f2-powerfail` (power-cut simulation and
+torn-write recovery), and `zlfs-f3-fsck` (`fsck_zlfs(8)`, an offline
+consistency checker).
 
 Regular files no longer buffer their whole contents in memory: writes
 land in a sparse per-block dirty overlay, partially covered blocks are
@@ -467,8 +468,9 @@ file no longer rewrites the file.
 
 ## Non-Goals For The Current Prototype
 
-- Not production-ready: no garbage collection, limited file and directory
-  sizes, and durability caveats above.
+- Not production-ready: experimental on-disk format, limited directory
+  sizes, and validation so far only on QEMU NVMe ZNS (no physical SMR
+  or cache-backed hardware yet).
 - No filesystem-level zoned allocation policy beyond append-at-write-pointer.
 - No promise of on-disk format or ABI stability before review.
 - No attempt to support drive-managed SMR specially; those already appear as normal disks.
