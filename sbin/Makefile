@@ -2,7 +2,7 @@
 
 SUBDIR=	atactl badsect bioctl clri dhcp6leased dhcpleased \
 	disklabel dmesg dump dumpfs fdisk fsck fsck_ext2fs fsck_ffs  \
-	fsck_msdos fsdb fsirand growfs ifconfig iked init ipsecctl  \
+	fsck_msdos fsck_zlfs fsdb fsirand growfs ifconfig iked init ipsecctl  \
 	isakmpd kbd ldattach mknod mount \
 	mount_cd9660 mount_ext2fs mount_ffs mount_msdos \
 	mount_nfs mount_ntfs mount_tmpfs mount_udf mount_zlfs \

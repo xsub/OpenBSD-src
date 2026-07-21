@@ -1,0 +1,73 @@
+.\"	$OpenBSD$
+.\"
+.\" Copyright (c) 2026 Pawel Suchanecki <subdcc@gmail.com>
+.\"
+.\" Permission to use, copy, modify, and distribute this software for any
+.\" purpose with or without fee is hereby granted, provided that the above
+.\" copyright notice and this permission notice appear in all copies.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+.\" WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+.\" MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+.\" ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+.\" WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+.\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+.\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+.\"
+.Dd $Mdocdate: July 21 2026 $
+.Dt FSCK_ZLFS 8
+.Os
+.Sh NAME
+.Nm fsck_zlfs
+.Nd check the consistency of a ZLFS file system
+.Sh SYNOPSIS
+.Nm
+.Op Fl v
+.Op Fl S Ar secsize
+.Ar special | image
+.Sh DESCRIPTION
+.Nm
+performs an offline, read-only consistency check of the ZLFS file
+system on
+.Ar special ,
+or on a plain image file
+.Ar image
+(for example a
+.Xr dd 1
+dump of the device).
+No zone commands are issued, so an image needs no zoned hardware.
+.Pp
+ZLFS is log-structured: nothing is ever repaired in place, because the
+zone contract forbids overwrites and every commit is already atomic --
+recovery from a bad newest generation is mounting an older one.
+.Nm
+therefore only reports.
+.Pp
+The check covers the superblock generation log (checksums, static
+geometry agreement, newest-generation selection), the checkpoint and
+inode map, every inode (identity, mode, link count, size bounds, a
+full walk of the direct, single-, double- and triple-indirect trees
+with range checks and cross-inode duplicate-block detection, and the
+re-derived block count), the directory tree from the root
+.Pq Dq \&. and Dq \&.. identity, dangling entries, cycles, link counts ,
+and orphaned inodes.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl S Ar secsize
+The device sector (LBA) size in bytes.
+Defaults to 512.
+.It Fl v
+Verbose: print a line for every inode, including the LBA of its inode
+block (useful for targeted corruption in tests).
+.El
+.Sh EXIT STATUS
+.Nm
+exits 0 when the file system is clean, 8 when inconsistencies were
+found, and 1 on operational errors.
+.Sh SEE ALSO
+.Xr fsck 8 ,
+.Xr mount_zlfs 8 ,
+.Xr newfs_zlfs 8
+.Sh AUTHORS
+.An Pawel Suchanecki Aq Mt subdcc@gmail.com
