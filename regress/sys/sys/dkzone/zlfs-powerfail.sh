@@ -18,6 +18,13 @@ set -eu
 #   faultpoint=3  checkpoint written, superblock dropped
 #   faultpoint=4  full commit, then dead (post-commit writes lost)
 #
+# LIMITATION: the faultpoint model stops the HOST from writing; it
+# cannot simulate the DEVICE losing its volatile write cache at the
+# cut.  The post-superblock flush in zlfs_commit exists for exactly
+# that case and is exercised here only in the sense that every stage-4
+# "committed" assertion depends on it having run; proving it needs a
+# power cut on real cache-backed hardware.
+#
 # WARNING: this reformats the given disk with newfs_zlfs.
 
 usage()

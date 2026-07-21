@@ -1274,8 +1274,9 @@ zlfs_commit(struct zlfs_mount *zmp)
 
 	/*
 	 * 4. Flush the segment (data, inodes, map, checkpoint) to stable
-	 * storage, then append the generation N+1 superblock as the
-	 * durable commit point.
+	 * storage, then append the generation N+1 superblock -- the
+	 * atomic commit point, durable only once the second flush below
+	 * has pushed it out of the device's volatile cache.
 	 */
 	error = dk_zone_flush_kern(zmp->zm_dev);
 	if (error != 0)
