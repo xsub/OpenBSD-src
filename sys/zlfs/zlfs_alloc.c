@@ -137,17 +137,9 @@ zlfs_gc_mark(struct zlfs_mount *zmp, u_int64_t lba)
 static int
 zlfs_gc_mark_blocks(struct zlfs_mount *zmp, const struct zlfs_inode *zi)
 {
-	struct buf *bp, *l2bp;
-	u_int64_t j, k, l1, nindir = ZLFS_NINDIR(zmp);
+	struct buf *bp, *mbp, *lbp;
+	u_int64_t j, k, m, l1, mid, leaf, nindir = ZLFS_NINDIR(zmp);
 	int error;
-
-	/*
-	 * This implementation never writes triple indirect blocks; if
-	 * some other writer of this format did, the blocks they reach
-	 * would not be marked, so refuse to reclaim anything.
-	 */
-	if (zi->zi_ib[2] != 0)
-		return EFTYPE;
 
 	for (j = 0; j < ZLFS_NDADDR; j++)
 		zlfs_gc_mark(zmp, zi->zi_db[j]);
@@ -170,16 +162,68 @@ zlfs_gc_mark_blocks(struct zlfs_mount *zmp, const struct zlfs_inode *zi)
 			l1 = letoh64(((u_int64_t *)bp->b_data)[j]);
 			if (l1 == 0)
 				continue;
+			/* An entry aliasing a buffer this walk already
+			 * holds B_BUSY would self-deadlock in bread;
+			 * such metadata is corrupt -- reclaim nothing. */
+			if (l1 == zi->zi_ib[1]) {
+				brelse(bp);
+				return EFTYPE;
+			}
 			zlfs_gc_mark(zmp, l1);
-			error = zlfs_bread_block(zmp, l1, &l2bp);
+			error = zlfs_bread_block(zmp, l1, &mbp);
 			if (error != 0) {
 				brelse(bp);
 				return error;
 			}
 			for (k = 0; k < nindir; k++)
 				zlfs_gc_mark(zmp,
-				    letoh64(((u_int64_t *)l2bp->b_data)[k]));
-			brelse(l2bp);
+				    letoh64(((u_int64_t *)mbp->b_data)[k]));
+			brelse(mbp);
+		}
+		brelse(bp);
+	}
+	if (zi->zi_ib[2] != 0) {
+		/* Triple tree: top -> mid -> leaf -> data. */
+		zlfs_gc_mark(zmp, zi->zi_ib[2]);
+		error = zlfs_bread_block(zmp, zi->zi_ib[2], &bp);
+		if (error != 0)
+			return error;
+		for (j = 0; j < nindir; j++) {
+			mid = letoh64(((u_int64_t *)bp->b_data)[j]);
+			if (mid == 0)
+				continue;
+			if (mid == zi->zi_ib[2]) {
+				brelse(bp);
+				return EFTYPE;	/* held-buffer alias */
+			}
+			zlfs_gc_mark(zmp, mid);
+			error = zlfs_bread_block(zmp, mid, &mbp);
+			if (error != 0) {
+				brelse(bp);
+				return error;
+			}
+			for (k = 0; k < nindir; k++) {
+				leaf = letoh64(((u_int64_t *)mbp->b_data)[k]);
+				if (leaf == 0)
+					continue;
+				if (leaf == zi->zi_ib[2] || leaf == mid) {
+					brelse(mbp);
+					brelse(bp);
+					return EFTYPE;	/* held-buffer alias */
+				}
+				zlfs_gc_mark(zmp, leaf);
+				error = zlfs_bread_block(zmp, leaf, &lbp);
+				if (error != 0) {
+					brelse(mbp);
+					brelse(bp);
+					return error;
+				}
+				for (m = 0; m < nindir; m++)
+					zlfs_gc_mark(zmp, letoh64(
+					    ((u_int64_t *)lbp->b_data)[m]));
+				brelse(lbp);
+			}
+			brelse(mbp);
 		}
 		brelse(bp);
 	}
@@ -466,8 +510,17 @@ zlfs_compact_zone(struct zlfs_mount *zmp, u_int64_t victim)
 		 * metadata (inode or indirect blocks) is also in the
 		 * victim, force the commit to relocate the indirect blocks
 		 * too.  Either way the node must be dirtied to be picked up.
+		 *
+		 * A file beyond the write cap (only another implementation
+		 * of the format can produce one) cannot go through the
+		 * overlay: skip it.  Its zones stay uncompactable, which
+		 * degrades reclamation but keeps the data safe.
 		 */
 		nblk = howmany(znp->zn_dinode.zi_size, bsize);
+		if (nblk > ZLFS_MAXFILESZ(zmp) / bsize) {
+			vput(vp);
+			continue;
+		}
 		prepared = 0;
 		for (b = 0; b < nblk; b++) {
 			error = zlfs_bmap_read(znp, b, &lba);
