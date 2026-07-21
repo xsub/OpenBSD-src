@@ -251,16 +251,25 @@ zlfs_sb_discover(struct zlfs_mount *zmp, const struct dk_zone *sbz,
 			return error;
 
 		if (wp != DK_ZONE_WP_INVALID && wp > start) {
+			u_int64_t top;
+
 			/*
 			 * Write-pointer zone: the newest entry sits just
 			 * below the write pointer; torn tails fail the
-			 * checksum and the scan steps further back.
+			 * checksum and the scan steps further back.  A
+			 * power cut can also leave the write pointer
+			 * itself mid-block; align the scan base down to
+			 * the block stride first, or every probe would
+			 * sit off-stride and miss the aligned entries --
+			 * recovering, at best, the ancient zone-start
+			 * generation.
 			 */
-			nscan = (wp - start) / bs_lbas;
+			top = start + ((wp - start) / bs_lbas) * bs_lbas;
+			nscan = (top - start) / bs_lbas;
 			if (nscan > ZLFS_SB_SCAN_MAX)
 				nscan = ZLFS_SB_SCAN_MAX;
 			for (k = 1; k <= nscan; k++) {
-				cand = wp - k * bs_lbas;
+				cand = top - k * bs_lbas;
 				if (cand <= start)
 					break;
 				error = zlfs_sb_try(zmp, cand, bsize, z, &best,

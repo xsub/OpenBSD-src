@@ -49,6 +49,9 @@ struct zlfs_mount {
 	u_int64_t	 zm_ninodes;	/* number of zm_imap entries */
 	size_t		 zm_imap_alloc;	/* bytes allocated for zm_imap */
 	int		 zm_rdonly;	/* mounted read-only */
+	int		 zm_faultpoint;	/* TEST: armed power-cut stage, or 0 */
+	int		 zm_dead;	/* TEST: fault fired; no write may
+					   reach the device anymore */
 
 	/* Data-log head (append point for new data/metadata blocks). */
 	u_int64_t	 zm_log_lba;	/* next free device LBA */
@@ -159,6 +162,21 @@ struct zlfs_node {
 #define ZLFS_GC_MIN_FREE	2
 #define ZLFS_GC_MIN_COMPACT	4
 
+/*
+ * TEST power-cut stages for the -o faultpoint=N mount option.  When
+ * the armed stage is reached the mount goes dead: the hook and every
+ * later write return failure, exactly as if power was lost there.
+ * The sync/fsync that fires the fault reports EIO (a crashing commit
+ * IS a failed commit); afterwards the mount is frozen -- syncs
+ * succeed as no-ops so unmount works, and writes fail EIO rather
+ * than accumulate unbounded overlay memory.  Recovery is a clean
+ * remount.
+ */
+#define ZLFS_FAULT_SEG		1	/* at commit start: nothing written */
+#define ZLFS_FAULT_CKPT		2	/* segment written, checkpoint dropped */
+#define ZLFS_FAULT_SB		3	/* checkpoint written, superblock dropped */
+#define ZLFS_FAULT_AFTER	4	/* full commit, then dead */
+
 extern const struct vops zlfs_vops;
 
 /* zlfs_vfsops.c */
@@ -191,6 +209,7 @@ int		zlfs_alloc_block(struct zlfs_mount *, u_int64_t *);
 void		zlfs_clean(struct zlfs_mount *);
 
 /* zlfs_write.c */
+int		zlfs_fault(struct zlfs_mount *, int);
 int		zlfs_write_block(struct zlfs_mount *, u_int64_t, const void *);
 int		zlfs_bmap_read(struct zlfs_node *, u_int64_t, u_int64_t *);
 int		zlfs_node_load(struct zlfs_node *);

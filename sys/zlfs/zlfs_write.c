@@ -29,6 +29,22 @@
 #include <zlfs/zlfs_var.h>
 
 /*
+ * TEST hook: when the armed faultpoint stage is reached the mount goes
+ * dead -- this call and every later write fail, exactly as if power
+ * was cut there.  Returns nonzero once dead.
+ */
+int
+zlfs_fault(struct zlfs_mount *zmp, int point)
+{
+	if (zmp->zm_faultpoint == point && !zmp->zm_dead) {
+		zmp->zm_dead = 1;
+		printf("zlfs: TEST faultpoint %d hit -- simulating power "
+		    "loss\n", point);
+	}
+	return zmp->zm_dead;
+}
+
+/*
  * Write one filesystem block (block_size bytes) from data to device
  * LBA lba, staging through a DMA-capable buffer.
  */
@@ -39,6 +55,8 @@ zlfs_write_block(struct zlfs_mount *zmp, u_int64_t lba, const void *data)
 	void *buf;
 	int error;
 
+	if (zmp->zm_dead)
+		return EIO;	/* TEST: powered off mid-commit */
 	buf = dma_alloc(bsize, PR_WAITOK);
 	if (buf == NULL)
 		return ENOMEM;
@@ -395,6 +413,13 @@ zlfs_dblk_backpressure(struct zlfs_node *znp)
 {
 	if (znp->zn_dblkcnt < ZLFS_DBLK_MAXBUFS)
 		return 0;
+	/*
+	 * A dead (TEST-power-cut) mount can never flush, so the commit
+	 * below would return success while freeing nothing and the
+	 * overlay would grow without bound; fail the write instead.
+	 */
+	if (znp->zn_zmp->zm_dead)
+		return EIO;
 	return zlfs_commit(znp->zn_zmp);
 }
 
@@ -935,6 +960,8 @@ zlfs_commit_super(struct zlfs_mount *zmp, u_int8_t *blk, u_int64_t generation,
 	u_int64_t sb_lba;
 	int error, other;
 
+	if (zmp->zm_dead)
+		return EIO;	/* TEST: powered off before the commit point */
 	if (zmp->zm_sb_lba + bpb >
 	    zmp->zm_sb_zstart[zmp->zm_sb_zidx] + zmp->zm_sb_zcap) {
 		other = zmp->zm_sb_zidx ^ 1;
@@ -1020,6 +1047,8 @@ zlfs_commit(struct zlfs_mount *zmp)
 
 	if (zmp->zm_rdonly)
 		return EROFS;
+	if (zmp->zm_dead)
+		return 0;	/* TEST: powered off; nothing happens anymore */
 
 	for (tries = 0;; tries++) {
 		rw_enter_write(&zmp->zm_wlock);
@@ -1087,6 +1116,12 @@ zlfs_commit(struct zlfs_mount *zmp)
 		}
 		tsleep_nsec(&zmp->zm_wlock, PPAUSE, "zlfsretry",
 		    10 * 1000 * 1000ULL);
+	}
+
+	/* TEST: crash at commit start -- nothing of this segment lands. */
+	if (zlfs_fault(zmp, ZLFS_FAULT_SEG)) {
+		error = EIO;
+		goto out;
 	}
 
 	/*
@@ -1200,6 +1235,12 @@ zlfs_commit(struct zlfs_mount *zmp)
 		imap_lbas[j] = imap_lba;
 	}
 
+	/* TEST: crash between the segment and its checkpoint. */
+	if (zlfs_fault(zmp, ZLFS_FAULT_CKPT)) {
+		error = EIO;
+		goto out_blk;
+	}
+
 	/* 3. New checkpoint (generation N+1). */
 	error = zlfs_alloc_block(zmp, &ckpt_lba);
 	if (error != 0)
@@ -1225,6 +1266,12 @@ zlfs_commit(struct zlfs_mount *zmp)
 	if (error != 0)
 		goto out_blk;
 
+	/* TEST: crash after the checkpoint, before the superblock. */
+	if (zlfs_fault(zmp, ZLFS_FAULT_SB)) {
+		error = EIO;
+		goto out_blk;
+	}
+
 	/*
 	 * 4. Flush the segment (data, inodes, map, checkpoint) to stable
 	 * storage, then append the generation N+1 superblock as the
@@ -1238,6 +1285,24 @@ zlfs_commit(struct zlfs_mount *zmp)
 		goto out_blk;
 
 	/*
+	 * 4b. Flush again: the superblock append itself must reach
+	 * stable storage before fsync/sync may report success -- without
+	 * this the commit record can sit in the device's volatile write
+	 * cache and a real power cut would silently undo a
+	 * reported-durable commit (the next mount recovers generation N).
+	 * If this flush fails the in-core generation still advances --
+	 * the generation N+1 entry was issued and may be durable, so a
+	 * retry must not reuse its number -- but the dirty flags survive
+	 * and the data recommits as generation N+2.
+	 */
+	error = dk_zone_flush_kern(zmp->zm_dev);
+	if (error != 0) {
+		zmp->zm_super.zs_generation = newgen;
+		zmp->zm_super.zs_checkpoint_lba = ckpt_lba;
+		goto out_blk;
+	}
+
+	/*
 	 * 5. Committed: only now advance the in-core superblock so a
 	 * failed commit leaves it consistent with the durable state.
 	 */
@@ -1245,6 +1310,9 @@ zlfs_commit(struct zlfs_mount *zmp)
 	zmp->zm_super.zs_checkpoint_lba = ckpt_lba;
 	for (di2 = 0; di2 < nd; di2++)
 		dnodes[di2]->zn_dirty = 0;
+
+	/* TEST: full commit landed, then the power goes. */
+	(void)zlfs_fault(zmp, ZLFS_FAULT_AFTER);
 
 out_blk:
 	free(imap_lbas, M_ZLFS, bsize - sizeof(struct zlfs_checkpoint));

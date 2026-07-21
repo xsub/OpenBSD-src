@@ -41,7 +41,7 @@ main(int argc, char *argv[])
 {
 	struct zlfs_args args;
 	const char *errstr;
-	int ch, mntflags, sb_cap = 0;
+	int ch, mntflags, sb_cap = 0, faultpoint = 0;
 	char *dev, *opt, *opts, *rest, dir[PATH_MAX];
 
 	mntflags = 0;
@@ -49,9 +49,10 @@ main(int argc, char *argv[])
 		switch (ch) {
 		case 'o':
 			/*
-			 * Handle the ZLFS-specific sbcap=N (test clamp on
-			 * superblock-zone capacity) here; hand everything
-			 * else to getmntopts.
+			 * Handle the ZLFS-specific test options here --
+			 * sbcap=N (clamp on superblock-zone capacity) and
+			 * faultpoint=N (simulated power cut at commit
+			 * stage N); hand everything else to getmntopts.
 			 */
 			if ((opts = strdup(optarg)) == NULL)
 				err(1, "strdup");
@@ -62,6 +63,13 @@ main(int argc, char *argv[])
 					if (errstr != NULL)
 						errx(1, "sbcap is %s: %s",
 						    errstr, opt + 6);
+				} else if (strncmp(opt, "faultpoint=", 11)
+				    == 0) {
+					faultpoint = strtonum(opt + 11, 1, 4,
+					    &errstr);
+					if (errstr != NULL)
+						errx(1, "faultpoint is %s: %s",
+						    errstr, opt + 11);
 				} else if (*opt != '\0') {
 					getmntopts(opt, mopts, &mntflags);
 				}
@@ -87,6 +95,7 @@ main(int argc, char *argv[])
 	args.fspec = dev;
 	args.export_info.ex_root = DEFAULT_ROOTUID;
 	args.za_sb_cap = sb_cap;
+	args.za_faultpoint = faultpoint;
 
 	/* Read-write by default; -o ro selects a read-only mount. */
 	if (mntflags & MNT_RDONLY)
@@ -101,7 +110,8 @@ main(int argc, char *argv[])
 static void __dead
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-o options[,sbcap=N]] special node\n",
+	fprintf(stderr,
+	    "usage: %s [-o options[,sbcap=N][,faultpoint=N]] special node\n",
 	    getprogname());
 	exit(1);
 }
