@@ -114,6 +114,7 @@ usage(void)
 	fprintf(stderr,
 	    "       dkzone -S [-c sectors] [-i writes] [-s start-lba] device\n");
 	fprintf(stderr, "       dkzone -T [-c sectors] [-s start-lba] device\n");
+	fprintf(stderr, "       dkzone -A [-c sectors] [-s start-lba] device\n");
 	fprintf(stderr, "       dkzone -W [-c sectors] [-s start-lba] device\n");
 	fprintf(stderr, "       dkzone -w [-c sectors] [-s start-lba] device\n");
 	fprintf(stderr,
@@ -870,6 +871,50 @@ write_tail_probe(const char *path, u_int64_t start_lba, u_int sectors)
 	close(fd);
 	printf("ok\n");
 }
+
+/*
+ * Append a run of sectors at the current write pointer of the zone
+ * containing start_lba, WITHOUT resetting it -- a torn/garbage
+ * sequential append onto whatever is already there.
+ *
+ * The report and the write share ONE open on purpose.  The sd(4) write
+ * gate primes its per-zone cache from a zone report and invalidates it
+ * on every fresh device open (sd_get_parms -> sd_zoned_params), so a
+ * report in one process followed by a write in another is rejected
+ * (EROFS) -- the write's own open wipes the priming.  Reporting and
+ * writing on the same fd is the only way a userland append at the
+ * write pointer is accepted.
+ */
+static void
+write_append_probe(const char *path, u_int64_t start_lba, u_int sectors)
+{
+	struct dk_zone zone;
+	u_int secsize;
+	ssize_t n;
+	int error, fd;
+
+	fd = open(path, O_RDWR);
+	if (fd == -1)
+		err(1, "open %s", path);
+	secsize = device_secsize(fd);
+
+	report_one_fd(fd, path, start_lba, &zone);
+	n = write_lba_fd(fd, path, zone.dz_write_pointer_lba, secsize,
+	    sectors, &error);
+	close(fd);
+
+	if (n == -1) {
+		errno = error;
+		err(1, "append at write pointer %llu %s",
+		    (unsigned long long)zone.dz_write_pointer_lba, path);
+	}
+	if (n != (ssize_t)((size_t)secsize * sectors))
+		errx(1, "append wrote %zd bytes, expected %zu", n,
+		    (size_t)secsize * sectors);
+	printf("append_write lba=%llu bytes=%zu sectors=%u ok\n",
+	    (unsigned long long)zone.dz_write_pointer_lba,
+	    (size_t)secsize * sectors, sectors);
+}
 #endif
 
 int
@@ -893,6 +938,7 @@ main(int argc, char **argv)
 	int paginate = 0;
 	int write_sequence = 0;
 	int write_tail = 0;
+	int write_append = 0;
 	int write_allow = 0;
 	int write_policy = 0;
 #endif
@@ -908,10 +954,13 @@ main(int argc, char **argv)
 		usage();
 		return 0;
 	}
-	while ((ch = getopt(argc, argv, "ac:hi:l:m:n:pr:s:wWST")) != -1) {
+	while ((ch = getopt(argc, argv, "ac:hi:l:m:n:pr:s:wWSTA")) != -1) {
 		switch (ch) {
 		case 'a':
 			all = 1;
+			break;
+		case 'A':
+			write_append = 1;
 			break;
 		case 'c':
 			write_sectors = parse_write_sectors(optarg);
@@ -965,17 +1014,19 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	if (write_policy || write_allow || write_sequence || write_tail) {
+	if (write_policy || write_allow || write_sequence || write_tail ||
+	    write_append) {
 		if (argc != 1) {
 			usage();
 			return 1;
 		}
 		if ((write_policy != 0) + (write_allow != 0) +
-		    (write_sequence != 0) + (write_tail != 0) > 1)
-			errx(1, "-S, -T, -w, and -W cannot be combined");
+		    (write_sequence != 0) + (write_tail != 0) +
+		    (write_append != 0) > 1)
+			errx(1, "-A, -S, -T, -w, and -W cannot be combined");
 		if (cmd != NULL || all || have_lba || have_report_option ||
 		    paginate)
-			errx(1, "-S/-T/-w/-W cannot be combined with -a, -l, "
+			errx(1, "-A/-S/-T/-w/-W cannot be combined with -a, -l, "
 			    "-m, -p, or -r");
 		if (!write_sequence && have_write_iterations)
 			errx(1, "-i is only valid with -S");
@@ -984,6 +1035,8 @@ main(int argc, char **argv)
 			    write_sectors, write_iterations);
 		else if (write_tail)
 			write_tail_probe(argv[0], start_lba, write_sectors);
+		else if (write_append)
+			write_append_probe(argv[0], start_lba, write_sectors);
 		else
 			write_probe(argv[0], start_lba, write_sectors,
 			    write_allow);
