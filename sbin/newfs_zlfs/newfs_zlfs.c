@@ -79,7 +79,8 @@ static void		crc32c_init(void);
 static u_int32_t	crc32c_add(u_int32_t, const void *, size_t);
 static u_int32_t	crc32c(const void *, size_t);
 static u_int32_t	device_secsize(int);
-static void		scan_zones(int, const char *, struct zone_geometry *);
+static void		scan_zones(int, const char *, struct zone_geometry *,
+			    u_int64_t);
 static void		zone_reset(int, const char *, u_int64_t);
 static void		zone_arm(int, const char *, u_int64_t);
 static void		build_super(struct zlfs_super *, u_int32_t,
@@ -144,12 +145,17 @@ device_secsize(int fd)
 }
 
 /*
- * Enumerate every zone on the device and derive the geometry ZLFS
- * requires: contiguous zones of one uniform size, all sequential
- * (write-pointer) zones, with a uniform minimum capacity.
+ * Enumerate the device's zones and derive the geometry ZLFS requires:
+ * contiguous zones of one uniform size, all sequential (write-pointer)
+ * zones, with a uniform minimum capacity.  A nonzero zone clamp stops
+ * the scan there, so the filesystem occupies only the first N zones --
+ * the kernel allocator and GC never step past zs_total_zones, and on a
+ * capacity-class drive (26 TB SMR) a clamp is what makes the
+ * space-pressure regress suites meaningful at all.
  */
 static void
-scan_zones(int fd, const char *path, struct zone_geometry *g)
+scan_zones(int fd, const char *path, struct zone_geometry *g,
+    u_int64_t zclamp)
 {
 	struct dk_zone_report report;
 	struct dk_zone *zones;
@@ -227,6 +233,11 @@ scan_zones(int fd, const char *path, struct zone_geometry *g)
 				errx(1, "%s: zone range overflow", path);
 			g->device_lbas = z->dz_start_lba + z->dz_length_lba;
 			g->total_zones++;
+
+			if (zclamp != 0 && g->total_zones >= zclamp) {
+				done = 1;
+				break;
+			}
 		}
 
 		if (report.dzr_max_lba != 0 &&
@@ -493,7 +504,8 @@ static void __dead
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: %s [-Nq] [-b block-size] special\n", getprogname());
+	    "usage: %s [-Nq] [-b block-size] [-z zones] special\n",
+	    getprogname());
 	exit(1);
 }
 
@@ -505,11 +517,11 @@ main(int argc, char *argv[])
 	const char *errstr, *path;
 	char *realname = NULL;
 	u_int8_t uuid[16];
-	u_int64_t cap_bytes;
+	u_int64_t cap_bytes, zclamp = 0;
 	u_int32_t block_size = ZLFS_DFL_BLOCK_SIZE, secsize;
 	int ch, fd, i, dryrun = 0, quiet = 0;
 
-	while ((ch = getopt(argc, argv, "Nb:q")) != -1) {
+	while ((ch = getopt(argc, argv, "Nb:qz:")) != -1) {
 		switch (ch) {
 		case 'N':
 			dryrun = 1;
@@ -523,6 +535,19 @@ main(int argc, char *argv[])
 			break;
 		case 'q':
 			quiet = 1;
+			break;
+		case 'z':
+			/*
+			 * Occupy only the first N zones.  On capacity-class
+			 * drives this keeps the space-pressure tests
+			 * meaningful; the kernel needs no matching option
+			 * because nothing steps past zs_total_zones.
+			 */
+			zclamp = strtonum(optarg, ZLFS_SB_ZONES + 1,
+			    1LL << 32, &errstr);
+			if (errstr != NULL)
+				errx(1, "zone count is %s: %s", errstr,
+				    optarg);
 			break;
 		default:
 			usage();
@@ -556,7 +581,19 @@ main(int argc, char *argv[])
 		errx(1, "block size %u incompatible with %u-byte sectors",
 		    block_size, secsize);
 
-	scan_zones(fd, path, &g);
+	scan_zones(fd, path, &g, zclamp);
+
+	/*
+	 * A clamp larger than the device is silently unmet -- the scan
+	 * just runs out of zones first.  Warn loudly so a test that sized
+	 * its workload from the requested clamp is not misled into
+	 * believing the rest of the device was left untouched.
+	 */
+	if (zclamp != 0 && g.total_zones < zclamp)
+		warnx("%s: requested %llu zones but the device has only %llu; "
+		    "the whole device was formatted", path,
+		    (unsigned long long)zclamp,
+		    (unsigned long long)g.total_zones);
 
 	if (g.min_cap_lba > UINT64_MAX / secsize)
 		errx(1, "%s: zone capacity overflow", path);

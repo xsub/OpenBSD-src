@@ -61,7 +61,8 @@ sizes="4 20 200 600 1500 40 300 4096"
 
 section "newfs + mount ($writers writers, $iters iters each)"
 umount "$mnt" 2>/dev/null || true
-newfs_zlfs "$disk"
+# ZLFS_NEWFS_ZONES=N clamps the fs to N zones (capacity-class drives).
+newfs_zlfs ${ZLFS_NEWFS_ZONES:+-z "$ZLFS_NEWFS_ZONES"} "$disk"
 mkdir -p "$mnt"
 mount_zlfs "$dev" "$mnt"
 
