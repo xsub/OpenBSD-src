@@ -24,6 +24,7 @@
 .Nm
 .Op Fl Nq
 .Op Fl b Ar block-size
+.Op Fl z Ar zones
 .Ar special
 .Sh DESCRIPTION
 .Nm
@@ -56,6 +57,18 @@ The file system block size in bytes, a power of two between 512 and
 The default is 4096.
 .It Fl q
 Quiet: suppress the geometry summary.
+.It Fl z Ar zones
+Occupy only the first
+.Ar zones
+zones of the device (at least 3: two superblock zones and one data
+zone).
+The rest of the device is left untouched, and the kernel never
+allocates past the recorded zone count.
+On capacity-class drives this keeps the space-pressure regress suites
+meaningful; the
+.Ev ZLFS_NEWFS_ZONES
+environment variable passes the same clamp through the regress
+scripts.
 .El
 .Sh SEE ALSO
 .Xr dkzone 4 ,

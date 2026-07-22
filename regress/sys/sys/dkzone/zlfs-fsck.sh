@@ -55,8 +55,21 @@ command -v fsck_zlfs >/dev/null || die "fsck_zlfs not installed"
 
 section "newfs + populate"
 umount "$mnt" 2>/dev/null || true
-newfs_zlfs "$disk"
-mkdir -p "$mnt"
+# ZLFS_NEWFS_ZONES=N clamps the fs to N zones (capacity-class drives).
+newfs_zlfs ${ZLFS_NEWFS_ZONES:+-z "$ZLFS_NEWFS_ZONES"} "$disk" > "$tdir/newfs" || \
+    die "newfs failed"
+cat "$tdir/newfs"
+# Geometry drives everything below: LBAs are device sectors (not a
+# fixed 512), and the prefix image must reach the checkpoint (in the
+# first data zone) -- both derived from what newfs actually used
+# ("N zones of M LBAs (S-byte sectors) ...").
+zlbas=$(sed -n 's/.* zones of \([0-9]*\) LBAs .*/\1/p' "$tdir/newfs")
+secsz=$(sed -n 's/.*(\([0-9]*\)-byte sectors).*/\1/p' "$tdir/newfs")
+case "$zlbas" in ''|*[!0-9]*) die "cannot parse zone size from newfs";; esac
+case "$secsz" in ''|*[!0-9]*) die "cannot parse sector size from newfs";; esac
+# Four zones (2 SB + 2 data) cover the checkpoint and this small
+# populate with headroom, whatever the zone size.
+imgmb=$(( (zlbas * secsz * 4 + 1048575) / 1048576 ))
 mount_zlfs "$dev" "$mnt"
 mkdir -p "$mnt/d1/d2"
 dd if=/dev/random of="$mnt/small" bs=4k count=4 2>/dev/null
@@ -74,7 +87,7 @@ fsck_zlfs "$rdev" || die "clean filesystem reported errors"
 echo "  ok: device clean"
 
 section "prefix image checks clean"
-dd if="$rdev" of="$img" bs=1m count=256 2>/dev/null
+dd if="$rdev" of="$img" bs=1m count="$imgmb" 2>/dev/null
 fsck_zlfs "$img" || die "pristine image reported errors"
 echo "  ok: image clean"
 
@@ -86,7 +99,7 @@ lba=$(fsck_zlfs -v "$img" | awk '/^inode/ && /file/ { print $NF; exit }')
 [ -n "$lba" ] || die "cannot find an inode lba in fsck -v output"
 cp "$img" "$img.bad"
 printf '\377\377\377\377\377\377\377\377' | \
-    dd of="$img.bad" bs=512 seek="$lba" conv=notrunc 2>/dev/null
+    dd of="$img.bad" bs="$secsz" seek="$lba" conv=notrunc 2>/dev/null
 if fsck_zlfs "$img.bad" >/dev/null 2>&1; then
 	die "corrupted inode not detected"
 fi
@@ -97,7 +110,7 @@ section "corrupt a block pointer -> detected"
 # mode..spare + 4x8 times + 4x4 nsec = 104); write an out-of-range LBA.
 cp "$img" "$img.bad"
 printf '\377\377\377\377\377\377\377\177' | \
-    dd of="$img.bad" bs=1 seek=$((lba * 512 + 104)) conv=notrunc \
+    dd of="$img.bad" bs=1 seek=$((lba * secsz + 104)) conv=notrunc \
     2>/dev/null
 if fsck_zlfs "$img.bad" >/dev/null 2>&1; then
 	die "corrupted block pointer not detected"
@@ -108,7 +121,7 @@ section "corrupt the checkpoint -> detected"
 ck=$(fsck_zlfs "$img" | awk '/checkpoint at lba/ { print $NF; exit }')
 [ -n "$ck" ] || die "cannot find checkpoint lba"
 cp "$img" "$img.bad"
-printf 'X' | dd of="$img.bad" bs=1 seek=$((ck * 512 + 100)) \
+printf 'X' | dd of="$img.bad" bs=1 seek=$((ck * secsz + 100)) \
     conv=notrunc 2>/dev/null
 if fsck_zlfs "$img.bad" >/dev/null 2>&1; then
 	die "corrupted checkpoint not detected"

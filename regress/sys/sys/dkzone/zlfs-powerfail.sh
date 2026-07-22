@@ -74,7 +74,8 @@ sb_wp()
 
 section "newfs + baseline state"
 umount "$mnt" 2>/dev/null || true
-newfs_zlfs "$disk"
+# ZLFS_NEWFS_ZONES=N clamps the fs to N zones (capacity-class drives).
+newfs_zlfs ${ZLFS_NEWFS_ZONES:+-z "$ZLFS_NEWFS_ZONES"} "$disk"
 mkdir -p "$mnt"
 mount_zlfs "$dev" "$mnt"
 dd if=/dev/random of="$tdir/ta" bs=4k count=300 2>/dev/null
