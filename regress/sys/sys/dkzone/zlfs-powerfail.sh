@@ -155,7 +155,17 @@ echo "  ok: superblock append is exactly the commit point"
 section "torn full-block superblock append (garbage at the SB wp)"
 wp=$(sb_wp)
 [ -n "$wp" ] || die "cannot read SB zone write pointer"
-dd if=/dev/random of="$rdev" bs=512 seek="$wp" count=8 2>/dev/null
+# The garbage lands via the gated raw path: a write AT the write
+# pointer is a legal sequential append, which sb_wp's report just
+# primed the zone cache for.  Surface the errno instead of hiding it
+# behind 2>/dev/null -- a rejection here (EROFS/EINVAL) means the gate
+# state is not what the test assumes, and swallowing it turns into a
+# silent set -e exit.
+if ! dd if=/dev/random of="$rdev" bs=512 seek="$wp" count=8 \
+    2>"$tdir/dderr"; then
+	cat "$tdir/dderr" >&2
+	die "raw write at SB wp $wp rejected by the gate"
+fi
 mount_zlfs "$dev" "$mnt"
 [ "$(cksum < "$mnt/fa")" = "$newacs" ] || die "fa lost to torn SB block"
 [ "$(cksum < "$mnt/fd")" = "$dcs" ] || die "fd lost to torn SB block"
@@ -171,7 +181,11 @@ echo "  ok: discovery skips the garbage generation"
 section "torn HALF-block superblock append (unaligned SB wp)"
 wp=$(sb_wp)
 [ -n "$wp" ] || die "cannot read SB zone write pointer"
-dd if=/dev/random of="$rdev" bs=512 seek="$wp" count=4 2>/dev/null
+if ! dd if=/dev/random of="$rdev" bs=512 seek="$wp" count=4 \
+    2>"$tdir/dderr"; then
+	cat "$tdir/dderr" >&2
+	die "raw half-block write at SB wp $wp rejected by the gate"
+fi
 mount_zlfs "$dev" "$mnt"
 [ "$(cksum < "$mnt/fh")" = "$hcs" ] || die "fh lost to half-block tear"
 dd if=/dev/random of="$mnt/fi" bs=4k count=50 2>/dev/null
