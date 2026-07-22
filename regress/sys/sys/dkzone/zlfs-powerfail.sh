@@ -58,19 +58,13 @@ tdir=/tmp/zlfs-pf.$$
 mkdir -p "$tdir"
 trap 'rm -rf "$tdir"' EXIT
 
-# The dkzone helper reports the superblock zone's write pointer for the
-# torn-append sections.
+# The dkzone helper injects garbage at the superblock zone's write
+# pointer (dkzone -A) for the torn-append sections.
 dkdir=$(cd "$(dirname "$0")" && pwd)
 if [ ! -x "$dkdir/obj/dkzone" ]; then
 	(cd "$dkdir" && make obj >/dev/null && make >/dev/null)
 fi
 dkzone=$dkdir/obj/dkzone
-
-# Write pointer (in 512-byte sectors) of superblock zone 0.
-sb_wp()
-{
-	"$dkzone" -r all -n 1 -s 0 "$rdev" | awk '$1 == "0" { print $5; exit }'
-}
 
 section "newfs + baseline state"
 umount "$mnt" 2>/dev/null || true
@@ -153,19 +147,13 @@ umount "$mnt"
 echo "  ok: superblock append is exactly the commit point"
 
 section "torn full-block superblock append (garbage at the SB wp)"
-wp=$(sb_wp)
-[ -n "$wp" ] || die "cannot read SB zone write pointer"
-# The garbage lands via the gated raw path: a write AT the write
-# pointer is a legal sequential append, which sb_wp's report just
-# primed the zone cache for.  Surface the errno instead of hiding it
-# behind 2>/dev/null -- a rejection here (EROFS/EINVAL) means the gate
-# state is not what the test assumes, and swallowing it turns into a
-# silent set -e exit.
-if ! dd if=/dev/random of="$rdev" bs=512 seek="$wp" count=8 \
-    2>"$tdir/dderr"; then
-	cat "$tdir/dderr" >&2
-	die "raw write at SB wp $wp rejected by the gate"
-fi
+# Append a full garbage block at the SB zone's write pointer.  This
+# MUST go through dkzone -A, not a separate dd: the sd(4) write gate
+# primes its per-zone cache from a report and invalidates it on every
+# fresh device open, so a report in one process and a dd in another is
+# rejected (EROFS) -- dkzone -A reports and writes on one open.
+"$dkzone" -A -s 0 -c 8 "$rdev" >/dev/null || \
+    die "cannot append a torn SB block at the write pointer"
 mount_zlfs "$dev" "$mnt"
 [ "$(cksum < "$mnt/fa")" = "$newacs" ] || die "fa lost to torn SB block"
 [ "$(cksum < "$mnt/fd")" = "$dcs" ] || die "fd lost to torn SB block"
@@ -179,13 +167,10 @@ umount "$mnt"
 echo "  ok: discovery skips the garbage generation"
 
 section "torn HALF-block superblock append (unaligned SB wp)"
-wp=$(sb_wp)
-[ -n "$wp" ] || die "cannot read SB zone write pointer"
-if ! dd if=/dev/random of="$rdev" bs=512 seek="$wp" count=4 \
-    2>"$tdir/dderr"; then
-	cat "$tdir/dderr" >&2
-	die "raw half-block write at SB wp $wp rejected by the gate"
-fi
+# Half a block (4 of 8 sectors) at the write pointer leaves the SB zone
+# wp block-unaligned -- the torn-append case both recovery fixes target.
+"$dkzone" -A -s 0 -c 4 "$rdev" >/dev/null || \
+    die "cannot append a half-block tear at the write pointer"
 mount_zlfs "$dev" "$mnt"
 [ "$(cksum < "$mnt/fh")" = "$hcs" ] || die "fh lost to half-block tear"
 dd if=/dev/random of="$mnt/fi" bs=4k count=50 2>/dev/null
