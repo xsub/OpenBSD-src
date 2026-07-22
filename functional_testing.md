@@ -44,12 +44,13 @@ size 4096; superblock (SB) zones 0-1, 126 data zones.
 
 | Concurrent-writers stress (multi-process): commit trylock/retry + compaction under live write load | `8ce0596b8ed` | ZBD#21, 2026-07-20: `zlfs-parallel.sh` PASS — 8 writers x 40 iters rewriting+syncing own files (direct/single/double indirect; half RMW-splicing) plus a background churn driving GC/compaction concurrently; every file byte-for-byte vs its template after the run AND after remount, keeper intact | first real multi-process test of the concurrency-safe commit |
 
+| Triple-indirect blocks (`zi_ib[2]` top->mid->leaf tree; lazy leaf tables in commit; GC marking + compaction relocation + `owns_meta` walk the third level; on-disk format to ~513 GB, write path capped at 16 GB — see §3) | `3f97d57d9b7` (`zlfs-f1-tripleind`) | ZBD#22, 2026-07-22: `zlfs-triple.sh` PASS — 1.24 GB across the double boundary, streaming cksum through the triple tree, deep RMW splice, remount, truncate-drops-tree, regrow amid churn, 60-cycle GC storm with the file live (df 79%, no ENOSPC) |
+
+| Power-fail simulation + torn-write recovery (`-o faultpoint=1..4` kills the mount at each commit stage; SB discovery scan-base aligned for torn write pointers; a torn SB zone is retired by ping-pong; post-superblock flush) | `zlfs-f2-powerfail` (`8ef61968481`) | ZBD#23, 2026-07-22: `zlfs-powerfail.sh` full PASS — all 4 faultpoint stages recover to the expected old/new state across remount; then a full-block and a HALF-block garbage append at the SB write pointer (via `dkzone -A`, one open) — discovery skips the full-block garbage and retires the half-block-torn SB zone by ping-pong.  Caught + fixed pre-PASS: the torn injection needed one-open report+write because the gate invalidates its zone cache on every device open (`dkzone -A` added) |
+
 ## 2. In testing — pushed, awaiting VM evidence
 
-| Feature | Branch / commits | Test to run | Notes |
-|---|---|---|---|
-| Triple-indirect blocks (`zi_ib[2]` top->mid->leaf tree; lazy leaf tables in commit; GC marking + compaction relocation + `owns_meta` walk the third level; on-disk format to ~513 GB, write path capped at 16 GB — see §3) | `zlfs-f1-tripleind` | `zlfs-triple.sh sd1c` — builds a 1.24 GB file across the double boundary, cksum-verifies streaming read, RMW splice deep in the triple range, remount, truncate below the boundary (drops the tree), regrow amid churn, 60-cycle GC/compaction storm, final remount | first of the stacked f1/f2/f3 branches for incremental VM testing |
-| Power-fail simulation + torn-write recovery (`-o faultpoint=1..4` kills the mount at each commit stage; SB discovery scan-base aligned for torn write pointers; a torn SB zone is retired by ping-pong; a torn data zone never becomes the log head) | `zlfs-f2-powerfail` (stacked on f1) | `zlfs-powerfail.sh sd1c` — crash at each of the 4 stages with old/new-state assertions after remount, then real garbage injected at the SB write pointer from userland: a full-block and a HALF-block torn append (the latter exercises both new recovery fixes) | needs the rebuilt mount_zlfs(8) too (new mount arg) |
+*(empty — f1 and f2 are validated; f3/f4/f5 rows live on their own branches)*
 
 ## 3. Under analysis / known gaps
 
