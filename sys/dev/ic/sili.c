@@ -1250,6 +1250,8 @@ sili_pmp_softreset(struct sili_softc *sc, int port, int pmp_port)
 		return (ATA_PORT_T_DISK);
 	case SATA_SIGNATURE_ATAPI:
 		return (ATA_PORT_T_ATAPI);
+	case SATA_SIGNATURE_ZAC:
+		return (ATA_PORT_T_ZAC);
 	case SATA_SIGNATURE_PORT_MULTIPLIER:
 		return (ATA_PORT_T_NONE);
 	default:
@@ -1286,6 +1288,8 @@ sili_port_softreset(struct sili_port *sp)
 		return (ATA_PORT_T_DISK);
 	case SATA_SIGNATURE_ATAPI:
 		return (ATA_PORT_T_ATAPI);
+	case SATA_SIGNATURE_ZAC:
+		return (ATA_PORT_T_ZAC);
 	case SATA_SIGNATURE_PORT_MULTIPLIER:
 		return (ATA_PORT_T_PM);
 	default:
@@ -1330,6 +1334,7 @@ sili_ata_probe(void *xsc, int port, int lun)
 				break;
 			case ATA_PORT_T_DISK:
 			case ATA_PORT_T_ATAPI:
+			case ATA_PORT_T_ZAC:
 				/* mark this port as active */
 				sp->sp_active_pmp_ports |= (1 << pmp_port);
 			default:
