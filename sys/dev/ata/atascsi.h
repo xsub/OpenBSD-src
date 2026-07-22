@@ -33,8 +33,17 @@ struct scsi_link;
 #define ATA_C_READDMA_EXT	0x25
 #define ATA_C_READ_LOG_EXT	0x2f
 #define ATA_C_WRITEDMA_EXT	0x35
+#define ATA_C_ZAC_MGMT_IN	0x4a	/* ZAC management in (REPORT ZONES) */
 #define ATA_C_READ_FPDMA	0x60
 #define ATA_C_WRITE_FPDMA	0x61
+#define ATA_C_ZAC_MGMT_OUT	0x9f	/* ZAC management out (zone ops) */
+/* ZAC MANAGEMENT IN actions (FEATURE 7:0). */
+#define ATA_ZAC_IN_REPORT_ZONES	0x00
+/* ZAC MANAGEMENT OUT actions (FEATURE 7:0); values match SCSI ZBC SAs. */
+#define ATA_ZAC_OUT_CLOSE	0x01
+#define ATA_ZAC_OUT_FINISH	0x02
+#define ATA_ZAC_OUT_OPEN	0x03
+#define ATA_ZAC_OUT_RESET_WP	0x04
 #define ATA_C_PACKET		0xa0
 #define ATA_C_IDENTIFY_PACKET	0xa1
 #define ATA_C_READDMA		0xc8
@@ -309,6 +318,7 @@ struct ata_log_page_10h {
 #define SATA_SIGNATURE_PORT_MULTIPLIER	0x96690101
 #define SATA_SIGNATURE_ATAPI		0xeb140101
 #define SATA_SIGNATURE_DISK		0x00000101
+#define SATA_SIGNATURE_ZAC		0xabcd0101 /* host-managed zoned */
 
 /*
  * ATA interface
@@ -389,6 +399,10 @@ struct atascsi_attach_args {
 #define ATA_PORT_T_DISK		1
 #define ATA_PORT_T_ATAPI	2
 #define ATA_PORT_T_PM		3
+#define ATA_PORT_T_ZAC		4	/* host-managed zoned disk; the
+					   controller's probe returns this,
+					   atascsi normalises it to T_DISK +
+					   ATA_PORT_F_ZAC at once */
 
 struct atascsi	*atascsi_attach(struct device *, struct atascsi_attach_args *);
 int		atascsi_detach(struct atascsi *, int);

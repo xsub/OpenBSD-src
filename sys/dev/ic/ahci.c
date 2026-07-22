@@ -1318,6 +1318,8 @@ ahci_port_signature(struct ahci_port *ap)
 	else if ((sig & 0xffff0000) == (SATA_SIGNATURE_PORT_MULTIPLIER &
 	    0xffff0000))
 		return (ATA_PORT_T_PM);
+	else if ((sig & 0xffff0000) == (SATA_SIGNATURE_ZAC & 0xffff0000))
+		return (ATA_PORT_T_ZAC);
 	else
 		return (ATA_PORT_T_DISK);
 }

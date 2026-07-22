@@ -84,6 +84,7 @@ struct atascsi_port {
 	int			ap_features;
 #define ATA_PORT_F_NCQ			0x1
 #define ATA_PORT_F_TRIM			0x2
+#define ATA_PORT_F_ZAC			0x4	/* host-managed zoned disk */
 };
 
 void		atascsi_cmd(struct scsi_xfer *);
@@ -117,6 +118,12 @@ void		atascsi_disk_capacity(struct scsi_xfer *);
 void		atascsi_disk_capacity16(struct scsi_xfer *);
 void		atascsi_disk_sync(struct scsi_xfer *);
 void		atascsi_disk_sync_done(struct ata_xfer *);
+void		atascsi_disk_zbc_in(struct scsi_xfer *);
+void		atascsi_disk_zbc_in_done(struct ata_xfer *);
+void		atascsi_disk_zbc_out(struct scsi_xfer *);
+void		atascsi_disk_zbc_out_done(struct ata_xfer *);
+void		atascsi_zac_report_letoh(void *, size_t);
+u_int8_t	atascsi_disk_device_type(struct atascsi_port *);
 void		atascsi_disk_sense(struct scsi_xfer *);
 void		atascsi_disk_start_stop(struct scsi_xfer *);
 void		atascsi_disk_start_stop_done(struct ata_xfer *);
@@ -236,7 +243,7 @@ atascsi_probe(struct scsi_link *link)
 	int				rv;
 	u_int16_t			cmdset;
 	u_int16_t			validinfo, ultradma;
-	int				i, xfermode = -1;
+	int				i, xfermode = -1, zac = 0;
 
 	port = link->target;
 	if (port >= link->bus->sb_adapter_buswidth)
@@ -250,6 +257,17 @@ atascsi_probe(struct scsi_link *link)
 
 	type = as->as_methods->ata_probe(as->as_cookie, port, link->lun);
 	switch (type) {
+	case ATA_PORT_T_ZAC:
+		/*
+		 * A host-managed zoned disk is an ordinary ATA disk that
+		 * also answers the ZAC zone commands.  Normalise it to
+		 * T_DISK immediately so every disk setup and dispatch path
+		 * runs unchanged; the ZAC capability rides on a feature
+		 * flag set once the port structure exists.
+		 */
+		zac = 1;
+		type = ATA_PORT_T_DISK;
+		break;
 	case ATA_PORT_T_DISK:
 		break;
 	case ATA_PORT_T_ATAPI:
@@ -297,6 +315,8 @@ atascsi_probe(struct scsi_link *link)
 
 	ap->ap_host_port = ahp;
 	ap->ap_type = type;
+	if (zac)
+		SET(ap->ap_features, ATA_PORT_F_ZAC);
 
 	link->pool = &ahp->ahp_iopool;
 
@@ -382,7 +402,15 @@ atascsi_probe(struct scsi_link *link)
 		}
 	}
 
-	if (ISSET(letoh16(ap->ap_identify.data_set_mgmt),
+	/*
+	 * Advertise TRIM only on non-zoned disks.  On host-managed SMR
+	 * the interaction of DSM TRIM with the per-zone write pointers is
+	 * device-specific and of no use to the zoned block path, which
+	 * reclaims space by resetting whole zones; leaving TRIM off also
+	 * keeps UNMAP / WRITE SAME / the thin-provisioning VPD inert.
+	 */
+	if (!ISSET(ap->ap_features, ATA_PORT_F_ZAC) &&
+	    ISSET(letoh16(ap->ap_identify.data_set_mgmt),
 	    ATA_ID_DATA_SET_MGMT_TRIM))
 		SET(ap->ap_features, ATA_PORT_F_TRIM);
 
@@ -557,6 +585,13 @@ atascsi_disk_cmd(struct scsi_xfer *xs)
 		atascsi_disk_start_stop(xs);
 		return;
 
+	case ZBC_IN:
+		atascsi_disk_zbc_in(xs);
+		return;
+	case ZBC_OUT:
+		atascsi_disk_zbc_out(xs);
+		return;
+
 	case TEST_UNIT_READY:
 	case PREVENT_ALLOW:
 		atascsi_done(xs, XS_NOERROR);
@@ -692,6 +727,17 @@ atascsi_disk_inq(struct scsi_xfer *xs)
 		atascsi_disk_inquiry(xs);
 }
 
+/*
+ * Peripheral device type reported to the SCSI midlayer: a host-managed
+ * zoned disk is T_ZBC, which is what makes sd(4) enable its zoned block
+ * path (sd_zoned_params); every other ATA disk is T_DIRECT.
+ */
+u_int8_t
+atascsi_disk_device_type(struct atascsi_port *ap)
+{
+	return (ISSET(ap->ap_features, ATA_PORT_F_ZAC) ? T_ZBC : T_DIRECT);
+}
+
 void
 atascsi_disk_inquiry(struct scsi_xfer *xs)
 {
@@ -703,7 +749,7 @@ atascsi_disk_inquiry(struct scsi_xfer *xs)
 
 	bzero(&inq, sizeof(inq));
 
-	inq.device = T_DIRECT;
+	inq.device = atascsi_disk_device_type(ap);
 	inq.version = SCSI_REV_SPC3;
 	inq.response_format = SID_SCSI2_RESPONSE;
 	inq.additional_length = SID_SCSI2_ALEN;
@@ -735,7 +781,7 @@ atascsi_disk_vpd_supported(struct scsi_xfer *xs)
 
 	bzero(&pg, sizeof(pg));
 
-	pg.hdr.device = T_DIRECT;
+	pg.hdr.device = atascsi_disk_device_type(ap);
 	pg.hdr.page_code = SI_PG_SUPPORTED;
 	_lto2b(sizeof(pg.list) - fat, pg.hdr.page_length);
 	pg.list[0] = SI_PG_SUPPORTED;
@@ -761,7 +807,7 @@ atascsi_disk_vpd_serial(struct scsi_xfer *xs)
 	ap = atascsi_lookup_port(link);
 	bzero(&pg, sizeof(pg));
 
-	pg.hdr.device = T_DIRECT;
+	pg.hdr.device = atascsi_disk_device_type(ap);
 	pg.hdr.page_code = SI_PG_SERIAL;
 	_lto2b(sizeof(ap->ap_identify.serial), pg.hdr.page_length);
 	ata_swapcopy(ap->ap_identify.serial, pg.serial,
@@ -813,7 +859,7 @@ atascsi_disk_vpd_ident(struct scsi_xfer *xs)
 	pg.devid_hdr.len = pg_len;
 	pg_len += sizeof(pg.devid_hdr);
 
-	pg.hdr.device = T_DIRECT;
+	pg.hdr.device = atascsi_disk_device_type(ap);
 	pg.hdr.page_code = SI_PG_DEVID;
 	_lto2b(pg_len, pg.hdr.page_length);
 	pg_len += sizeof(pg.hdr);
@@ -833,7 +879,7 @@ atascsi_disk_vpd_ata(struct scsi_xfer *xs)
 	ap = atascsi_lookup_port(link);
 	bzero(&pg, sizeof(pg));
 
-	pg.hdr.device = T_DIRECT;
+	pg.hdr.device = atascsi_disk_device_type(ap);
 	pg.hdr.page_code = SI_PG_ATA;
 	_lto2b(sizeof(pg) - sizeof(pg.hdr), pg.hdr.page_length);
 
@@ -874,7 +920,7 @@ atascsi_disk_vpd_limits(struct scsi_xfer *xs)
 
 	ap = atascsi_lookup_port(link);
 	bzero(&pg, sizeof(pg));
-	pg.hdr.device = T_DIRECT;
+	pg.hdr.device = atascsi_disk_device_type(ap);
 	pg.hdr.page_code = SI_PG_DISK_LIMITS;
 	_lto2b(SI_PG_DISK_LIMITS_LEN_THIN, pg.hdr.page_length);
 
@@ -905,7 +951,7 @@ atascsi_disk_vpd_info(struct scsi_xfer *xs)
 
 	ap = atascsi_lookup_port(link);
 	bzero(&pg, sizeof(pg));
-	pg.hdr.device = T_DIRECT;
+	pg.hdr.device = atascsi_disk_device_type(ap);
 	pg.hdr.page_code = SI_PG_DISK_INFO;
 	_lto2b(sizeof(pg) - sizeof(pg.hdr), pg.hdr.page_length);
 
@@ -931,7 +977,7 @@ atascsi_disk_vpd_thin(struct scsi_xfer *xs)
 	}
 
 	bzero(&pg, sizeof(pg));
-	pg.hdr.device = T_DIRECT;
+	pg.hdr.device = atascsi_disk_device_type(ap);
 	pg.hdr.page_code = SI_PG_DISK_THIN;
 	_lto2b(sizeof(pg) - sizeof(pg.hdr), pg.hdr.page_length);
 
@@ -1213,6 +1259,243 @@ atascsi_disk_sync_done(struct ata_xfer *xa)
 
 	default:
 		panic("atascsi_disk_sync_done: unexpected ata_xfer state (%d)",
+		    xa->state);
+	}
+
+	scsi_done(xs);
+}
+
+/*
+ * ZAC REPORT ZONES data is little-endian; the SCSI ZBC report layout
+ * sd(4) parses (sd_zone_from_srz, via _8btol) is big-endian.  Rewrite
+ * the multi-byte fields of the header and every descriptor in place so
+ * the buffer sd receives looks exactly like a SCSI ZBC report.  The
+ * single-byte fields (zone type, zone-condition/flags byte, SAME byte)
+ * share offsets between the two and are left untouched.
+ */
+void
+atascsi_zac_report_letoh(void *data, size_t len)
+{
+	struct scsi_report_zones_hdr	*hdr = data;
+	struct scsi_report_zones_desc	*desc;
+	u_int64_t			v64;
+	u_int32_t			v32;
+	size_t				i, ndesc;
+
+	if (len < sizeof(*hdr))
+		return;
+	memcpy(&v32, hdr->length, sizeof(v32));
+	_lto4b(letoh32(v32), hdr->length);
+	memcpy(&v64, hdr->maximum_lba, sizeof(v64));
+	_lto8b(letoh64(v64), hdr->maximum_lba);
+
+	ndesc = (len - sizeof(*hdr)) / sizeof(*desc);
+	for (i = 0; i < ndesc; i++) {
+		desc = &hdr->desc_list[i];
+		memcpy(&v64, desc->zone_length, sizeof(v64));
+		_lto8b(letoh64(v64), desc->zone_length);
+		memcpy(&v64, desc->zone_start_lba, sizeof(v64));
+		_lto8b(letoh64(v64), desc->zone_start_lba);
+		memcpy(&v64, desc->write_pointer_lba, sizeof(v64));
+		_lto8b(letoh64(v64), desc->write_pointer_lba);
+	}
+}
+
+/*
+ * ZBC IN (REPORT ZONES) -> ATA ZAC MANAGEMENT IN.  ZAC transfers whole
+ * 512-byte pages, but sd's report buffers are sizeof(hdr)+n*64 bytes
+ * and never a 512 multiple, so DMA into a rounded-up bounce buffer,
+ * byte-swap it to the SCSI layout, and copy back only what fits.
+ */
+void
+atascsi_disk_zbc_in(struct scsi_xfer *xs)
+{
+	struct scsi_link	*link = xs->sc_link;
+	struct atascsi		*as = link->bus->sb_adapter_softc;
+	struct atascsi_port	*ap;
+	struct ata_xfer		*xa = xs->io;
+	struct ata_fis_h2d	*fis;
+	struct scsi_zbc_in	*cdb = (struct scsi_zbc_in *)&xs->cmd;
+	u_int64_t		lba;
+	u_int32_t		npages;
+	size_t			buflen;
+	void			*buf;
+
+	ap = atascsi_lookup_port(link);
+	if (!ISSET(ap->ap_features, ATA_PORT_F_ZAC)) {
+		atascsi_done(xs, XS_DRIVER_STUFFUP);
+		return;
+	}
+	if (xs->cmdlen != sizeof(*cdb) ||
+	    (cdb->service_action & SRZ_TYPE_MASK) != ZBC_IN_SA_REPORT_ZONES) {
+		atascsi_done(xs, XS_DRIVER_STUFFUP);
+		return;
+	}
+	lba = _8btol(cdb->zone_start_lba);
+	if ((lba >> 48) != 0 ||
+	    xs->datalen < sizeof(struct scsi_report_zones_hdr) ||
+	    xs->datalen > MAXPHYS) {
+		atascsi_done(xs, XS_DRIVER_STUFFUP);
+		return;
+	}
+
+	buflen = roundup(xs->datalen, 512);
+	npages = buflen / 512;
+	buf = dma_alloc(buflen, (ISSET(xs->flags, SCSI_NOSLEEP) ?
+	    PR_NOWAIT : PR_WAITOK) | PR_ZERO);
+	if (buf == NULL) {
+		atascsi_done(xs, XS_BUSY);	/* resource shortage: requeue */
+		return;
+	}
+
+	xa->data = buf;
+	xa->datalen = buflen;
+	xa->flags = ATA_F_READ;
+	if (xs->flags & SCSI_POLL)
+		xa->flags |= ATA_F_POLL;
+	xa->complete = atascsi_disk_zbc_in_done;
+	xa->timeout = (xs->timeout < 45000) ? 45000 : xs->timeout;
+	xa->pmp_port = ap->ap_pmp_port;
+	xa->atascsi_private = xs;
+
+	fis = xa->fis;
+	fis->flags = ATA_H2D_FLAGS_CMD | ap->ap_pmp_port;
+	fis->command = ATA_C_ZAC_MGMT_IN;
+	fis->features = ATA_ZAC_IN_REPORT_ZONES;
+	/* Reporting options + PARTIAL bit ride in FEATURE(15:8). */
+	fis->features_exp = cdb->zone_options & (ZBC_IN_PARTIAL | ZBC_IN_REP_MASK);
+	fis->device = ATA_H2D_DEVICE_LBA;
+	fis->lba_low = lba & 0xff;
+	fis->lba_mid = (lba >> 8) & 0xff;
+	fis->lba_high = (lba >> 16) & 0xff;
+	fis->lba_low_exp = (lba >> 24) & 0xff;
+	fis->lba_mid_exp = (lba >> 32) & 0xff;
+	fis->lba_high_exp = (lba >> 40) & 0xff;
+	fis->sector_count = npages & 0xff;
+	fis->sector_count_exp = (npages >> 8) & 0xff;
+
+	ata_exec(as, xa);
+}
+
+void
+atascsi_disk_zbc_in_done(struct ata_xfer *xa)
+{
+	struct scsi_xfer	*xs = xa->atascsi_private;
+	size_t			buflen = xa->datalen, returned, n;
+
+	switch (xa->state) {
+	case ATA_S_COMPLETE:
+		returned = (xa->resid <= buflen) ? buflen - xa->resid : buflen;
+		atascsi_zac_report_letoh(xa->data, returned);
+		n = MIN(returned, (size_t)xs->datalen);
+		memcpy(xs->data, xa->data, n);
+		xs->resid = xs->datalen - n;
+		xs->error = XS_NOERROR;
+		break;
+	case ATA_S_ERROR:
+		xs->error = XS_DRIVER_STUFFUP;
+		break;
+	case ATA_S_TIMEOUT:
+		xs->error = XS_TIMEOUT;
+		break;
+	default:
+		panic("atascsi_disk_zbc_in_done: unexpected ata_xfer state (%d)",
+		    xa->state);
+	}
+
+	dma_free(xa->data, buflen);
+	scsi_done(xs);
+}
+
+/*
+ * ZBC OUT (CLOSE/FINISH/OPEN/RESET WRITE POINTER) -> ATA ZAC
+ * MANAGEMENT OUT, a non-data command.  The SCSI service actions and
+ * the ATA zone-management actions share values 0x01..0x04.
+ */
+void
+atascsi_disk_zbc_out(struct scsi_xfer *xs)
+{
+	struct scsi_link	*link = xs->sc_link;
+	struct atascsi		*as = link->bus->sb_adapter_softc;
+	struct atascsi_port	*ap;
+	struct ata_xfer		*xa = xs->io;
+	struct ata_fis_h2d	*fis;
+	struct scsi_zbc_out	*cdb = (struct scsi_zbc_out *)&xs->cmd;
+	u_int64_t		lba;
+	u_int8_t		sa, all;
+
+	ap = atascsi_lookup_port(link);
+	if (!ISSET(ap->ap_features, ATA_PORT_F_ZAC)) {
+		atascsi_done(xs, XS_DRIVER_STUFFUP);
+		return;
+	}
+	if (xs->cmdlen != sizeof(*cdb)) {
+		atascsi_done(xs, XS_DRIVER_STUFFUP);
+		return;
+	}
+	sa = cdb->service_action & SRZ_TYPE_MASK;
+	switch (sa) {
+	case ZBC_OUT_SA_CLOSE:
+	case ZBC_OUT_SA_FINISH:
+	case ZBC_OUT_SA_OPEN:
+	case ZBC_OUT_SA_RESET:
+		break;
+	default:
+		atascsi_done(xs, XS_DRIVER_STUFFUP);
+		return;
+	}
+	all = ISSET(cdb->zone_flags, ZBC_OUT_ALL) ? 1 : 0;
+	/* With ALL the zone id is ignored; force it to zero. */
+	lba = all ? 0 : _8btol(cdb->zone_id);
+	if ((lba >> 48) != 0) {
+		atascsi_done(xs, XS_DRIVER_STUFFUP);
+		return;
+	}
+
+	xa->datalen = 0;
+	xa->flags = ATA_F_READ;		/* non-data, like FLUSH CACHE */
+	if (xs->flags & SCSI_POLL)
+		xa->flags |= ATA_F_POLL;
+	xa->complete = atascsi_disk_zbc_out_done;
+	xa->timeout = (xs->timeout < 45000) ? 45000 : xs->timeout;
+	xa->pmp_port = ap->ap_pmp_port;
+	xa->atascsi_private = xs;
+
+	fis = xa->fis;
+	fis->flags = ATA_H2D_FLAGS_CMD | ap->ap_pmp_port;
+	fis->command = ATA_C_ZAC_MGMT_OUT;
+	fis->features = sa;		/* zone-management action */
+	fis->features_exp = all;	/* ALL bit = FEATURE bit 8 */
+	fis->device = ATA_H2D_DEVICE_LBA;
+	fis->lba_low = lba & 0xff;
+	fis->lba_mid = (lba >> 8) & 0xff;
+	fis->lba_high = (lba >> 16) & 0xff;
+	fis->lba_low_exp = (lba >> 24) & 0xff;
+	fis->lba_mid_exp = (lba >> 32) & 0xff;
+	fis->lba_high_exp = (lba >> 40) & 0xff;
+	fis->sector_count = 0;
+	fis->sector_count_exp = 0;
+
+	ata_exec(as, xa);
+}
+
+void
+atascsi_disk_zbc_out_done(struct ata_xfer *xa)
+{
+	struct scsi_xfer	*xs = xa->atascsi_private;
+
+	switch (xa->state) {
+	case ATA_S_COMPLETE:
+		xs->error = XS_NOERROR;
+		break;
+	case ATA_S_ERROR:
+		xs->error = XS_DRIVER_STUFFUP;
+		break;
+	case ATA_S_TIMEOUT:
+		xs->error = XS_TIMEOUT;
+		break;
+	default:
+		panic("atascsi_disk_zbc_out_done: unexpected ata_xfer state (%d)",
 		    xa->state);
 	}
 
