@@ -1,6 +1,7 @@
 # ATA ZAC (host-managed SMR SATA) support — parked branch `zlfs-f5-atascsi-zac`
 
-**Status: implemented, compiles clean, adversarial review pending fold-in,
+**Status: implemented, compiles clean (incl. against the OpenBSD 8.0
+rebase), adversarial review COMPLETE — all 5 lenses clean, zero findings.
 HARDWARE VALIDATION BLOCKED (no SATA ZAC in QEMU). Do not merge until the
 WDC 26 TB drive validates on a real AHCI port.**
 
@@ -77,23 +78,22 @@ Local `clang -fsyntax-only` (incl. `-Werror=unused-variable,
 -Werror=uninitialized, -Werror=implicit-function-declaration`) passes on
 all three kernel files.
 
-Adversarial review round `wf_b76846d6-629` (5 lenses) ran **partially**:
-- **zac-encoding** (the MUST-VERIFY ledger V1–V6 — the riskiest part):
-  completed, **zero findings**.
+Adversarial review is **COMPLETE — all 5 lenses clean, zero findings**:
+- **zac-encoding** (the MUST-VERIFY ledger V1–V6 — the riskiest part) —
+  round `wf_b76846d6-629`, zero findings.
 - **gate-geometry** (sd(4) integration: T_ZBC trigger, VPD 0xb6 absence,
-  write-gate priming, kern report loop): completed, **zero findings**.
-- **endian-resid**, **regression-safety**, **lifecycle**: did NOT
-  complete — the agents stalled on an infrastructure timeout (no progress
-  for 180 s × 6 attempts each), which is a harness failure, not a verdict
-  on the code. **These three must be re-run before merge** (see TODO #1).
+  write-gate priming, kern report loop) — round `wf_b76846d6-629`, zero
+  findings.
+- **endian-resid**, **regression-safety**, **lifecycle** — stalled on an
+  infra timeout in the first round; re-run to completion in round
+  `wf_10f05c4c-542` (post-rebase, committed f5), **zero findings** each.
 
-So the two lenses that finished (including the encoding ledger) found
-nothing, but that is a single-pass clean, not adversarially confirmed,
-and endian/resid, regression, and lifecycle are still UNVERIFIED.
-Re-run: `Workflow({scriptPath:
-".../workflows/scripts/verify-atascsi-zac-wf_b76846d6-629.js",
-resumeFromRunId: "wf_b76846d6-629"})` — the two clean lenses replay from
-cache; only the stalled three re-execute.
+Every lens examined the code and found no defect (single-pass clean per
+lens; no findings means no refuter pass was needed).  The riskiest
+surface — the ZAC register/protocol encodings (V1–V6) and the LE→BE
+report byte-swap — is the one that got the most scrutiny and stayed
+clean.  Remaining risk is purely that these are static reviews of
+encodings the tree cannot exercise; only the real drive closes that.
 
 ## MUST-VERIFY ledger (encodings not confirmable from the tree)
 
@@ -122,11 +122,8 @@ write to it:
 
 ## Remaining work (the TODO)
 
-1. **Finish the adversarial review** — round `wf_b76846d6-629` left the
-   endian-resid, regression-safety and lifecycle lenses stalled on an
-   infra timeout (the encoding + gate-geometry lenses completed clean).
-   Re-run those three (resume from the run id; clean lenses replay from
-   cache) and resolve any confirmed defect before merge.
+1. **Adversarial review — DONE** (all 5 lenses clean; rounds
+   `wf_b76846d6-629` + `wf_10f05c4c-542`).  No code changes were needed.
 2. **Confirm the MUST-VERIFY ledger against the ZAC-2 spec** (or Linux
    `drivers/ata/libata-scsi.c` `ata_scsi_zbc_in_xlat` /
    `ata_scsi_zbc_out_xlat` as a cross-check).
