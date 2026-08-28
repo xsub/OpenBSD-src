@@ -251,6 +251,7 @@ int	rw_obj_free(struct rwlock *);
 /* sorted alphabetically, keep in sync with dev/dt/dt_prov_static.c */
 #define DT_RWLOCK_IDX_NETLOCK	1
 #define DT_RWLOCK_IDX_SOLOCK	2
+#define DT_RWLOCK_IDX_VNODE	3
 
 #endif /* _KERNEL */
 

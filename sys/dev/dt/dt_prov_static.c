@@ -112,6 +112,7 @@ DT_STATIC_PROBE3(refcnt, tdb, "void *", "int", "int");
 DT_STATIC_PROBE0(rwlock, none);
 DT_STATIC_PROBE3(rwlock, netlock, "void *", "int", "int");
 DT_STATIC_PROBE3(rwlock, solock, "void *", "int", "int");
+DT_STATIC_PROBE3(rwlock, vnode, "void *", "int", "int");
 
 /*
  * List of all static probes
@@ -172,6 +173,7 @@ struct dt_probe *const dtps_static[] = {
 	&_DT_STATIC_P(rwlock, none),
 	&_DT_STATIC_P(rwlock, netlock),
 	&_DT_STATIC_P(rwlock, solock),
+	&_DT_STATIC_P(rwlock, vnode),
 };
 
 struct dt_probe *const *dtps_index_refcnt;
