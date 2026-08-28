@@ -709,7 +709,8 @@ retry:
 		return (error);
 	}
 	ip = malloc(sizeof(*ip), M_ISOFSNODE, M_WAITOK | M_ZERO);
-	rrw_init_flags(&ip->i_lock, "isoinode", RWL_DUPOK | RWL_IS_VNODE);
+	rrw_init_flags_trace(&ip->i_lock, "isoinode", RWL_DUPOK | RWL_IS_VNODE,
+	    DT_RWLOCK_IDX_VNODE);
 	vp->v_data = ip;
 	ip->i_vnode = vp;
 	ip->i_dev = dev;

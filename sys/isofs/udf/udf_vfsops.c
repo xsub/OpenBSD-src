@@ -636,7 +636,8 @@ udf_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	vp->v_data = up;
 	vref(ump->um_devvp);
 
-	rrw_init_flags(&up->u_lock, "unode", RWL_DUPOK | RWL_IS_VNODE);
+	rrw_init_flags_trace(&up->u_lock, "unode", RWL_DUPOK | RWL_IS_VNODE,
+	    DT_RWLOCK_IDX_VNODE);
 
 	/*
 	 * udf_hashins() will lock the vnode for us.

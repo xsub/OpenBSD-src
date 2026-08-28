@@ -313,7 +313,8 @@ again:
 		return error;
 	}
 
-	rrw_init_flags(&node->tn_vlock, "tnode", RWL_DUPOK | RWL_IS_VNODE);
+	rrw_init_flags_trace(&node->tn_vlock, "tnode",
+	    RWL_DUPOK | RWL_IS_VNODE, DT_RWLOCK_IDX_VNODE);
 	vp->v_type = node->tn_type;
 
 	/* Type-specific initialization. */

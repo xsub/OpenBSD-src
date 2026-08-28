@@ -139,7 +139,8 @@ loop:
 #ifdef VFSLCKDEBUG
 	vp->v_flag |= VLOCKSWORK;
 #endif
-	rrw_init_flags(&np->n_lock, "nfsnode", RWL_DUPOK | RWL_IS_VNODE);
+	rrw_init_flags_trace(&np->n_lock, "nfsnode", RWL_DUPOK | RWL_IS_VNODE,
+	    DT_RWLOCK_IDX_VNODE);
 	vp->v_data = np;
 	/* we now have an nfsnode on this vnode */
 	vp->v_flag &= ~VLARVAL;

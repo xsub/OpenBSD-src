@@ -311,8 +311,8 @@ retry:
 	}
 
 	ip = malloc(sizeof(*ip), M_FUSEFS, M_WAITOK | M_ZERO);
-	rrw_init_flags(&ip->i_lock, "fuseinode",
-	    RWL_DUPOK | RWL_IS_VNODE);
+	rrw_init_flags_trace(&ip->i_lock, "fuseinode",
+	    RWL_DUPOK | RWL_IS_VNODE, DT_RWLOCK_IDX_VNODE);
 	nvp->v_data = ip;
 	ip->i_vnode = nvp;
 	ip->i_fmp = fmp;

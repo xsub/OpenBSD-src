@@ -854,7 +854,8 @@ ext2fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	}
 
 	ip = pool_get(&ext2fs_inode_pool, PR_WAITOK|PR_ZERO);
-	rrw_init_flags(&ip->i_lock, "inode", RWL_DUPOK | RWL_IS_VNODE);
+	rrw_init_flags_trace(&ip->i_lock, "inode", RWL_DUPOK | RWL_IS_VNODE,
+	    DT_RWLOCK_IDX_VNODE);
 	vp->v_data = ip;
 	ip->i_vnode = vp;
 	ip->i_ump = ump;

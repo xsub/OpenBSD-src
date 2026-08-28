@@ -236,7 +236,8 @@ retry:
 		return (error);
 	}
 	ldep = malloc(sizeof(*ldep), M_MSDOSFSNODE, M_WAITOK | M_ZERO);
-	rrw_init_flags(&ldep->de_lock, "denode", RWL_DUPOK | RWL_IS_VNODE);
+	rrw_init_flags_trace(&ldep->de_lock, "denode",
+	    RWL_DUPOK | RWL_IS_VNODE, DT_RWLOCK_IDX_VNODE);
 	nvp->v_data = ldep;
 	ldep->de_vnode = nvp;
 	ldep->de_flag = 0;
