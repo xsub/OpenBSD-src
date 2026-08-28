@@ -216,7 +216,7 @@ int	rrw_status(struct rrwlock *);
 #define rrw_init(rrwl, name)	rrw_init_flags(rrwl, name, 0)
 #else /* WITNESS */
 #define rrw_init_flags(rrwl, name, flags) \
-				_rrw_init_flags(rrwl, name, 0, NULL)
+				_rrw_init_flags(rrwl, name, flags, NULL)
 #define rrw_init(rrwl, name)	_rrw_init_flags(rrwl, name, 0, NULL)
 #endif /* WITNESS */
 
