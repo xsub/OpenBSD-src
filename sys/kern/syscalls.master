@@ -139,7 +139,7 @@
 56	STD		{ int sys_revoke(const char *path); }
 57	STD		{ int sys_symlink(const char *path, \
 			    const char *link); }
-58	STD		{ ssize_t sys_readlink(const char *path, \
+58	STD NOLOCK	{ ssize_t sys_readlink(const char *path, \
 			    char *buf, size_t count); }
 59	STD		{ int sys_execve(const char *path, \
 			    char * const *argp, char * const *envp); }
@@ -557,7 +557,7 @@
 			    mode_t mode, dev_t dev); }
 321	STD NOLOCK	{ int sys_openat(int fd, const char *path, int flags, \
 			    ... mode_t mode); }
-322	STD		{ ssize_t sys_readlinkat(int fd, const char *path, \
+322	STD NOLOCK	{ ssize_t sys_readlinkat(int fd, const char *path, \
 			    char *buf, size_t count); }
 323	STD		{ int sys_renameat(int fromfd, const char *from, \
 			    int tofd, const char *to); }

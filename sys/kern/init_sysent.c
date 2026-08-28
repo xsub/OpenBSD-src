@@ -148,7 +148,7 @@ const struct sysent sysent[] = {
 	    sys_revoke },			/* 56 = revoke */
 	{ 2, s(struct sys_symlink_args), 0,
 	    sys_symlink },			/* 57 = symlink */
-	{ 3, s(struct sys_readlink_args), 0,
+	{ 3, s(struct sys_readlink_args), SY_NOLOCK | 0,
 	    sys_readlink },			/* 58 = readlink */
 	{ 3, s(struct sys_execve_args), 0,
 	    sys_execve },			/* 59 = execve */
@@ -733,7 +733,7 @@ const struct sysent sysent[] = {
 	    sys_mknodat },			/* 320 = mknodat */
 	{ 4, s(struct sys_openat_args), SY_NOLOCK | 0,
 	    sys_openat },			/* 321 = openat */
-	{ 4, s(struct sys_readlinkat_args), 0,
+	{ 4, s(struct sys_readlinkat_args), SY_NOLOCK | 0,
 	    sys_readlinkat },			/* 322 = readlinkat */
 	{ 4, s(struct sys_renameat_args), 0,
 	    sys_renameat },			/* 323 = renameat */

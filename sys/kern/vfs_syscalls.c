@@ -2154,8 +2154,11 @@ doreadlinkat(struct proc *p, int fd, const char *path, char *buf,
 	NDINITAT(&nd, LOOKUP, NOFOLLOW | LOCKLEAF, UIO_USERSPACE, fd, path, p);
 	nd.ni_pledge = PLEDGE_RPATH;
 	nd.ni_unveil = UNVEIL_READ;
-	if ((error = namei(&nd)) != 0)
+	KERNEL_LOCK();
+	if ((error = namei(&nd)) != 0) {
+		KERNEL_UNLOCK();
 		return (error);
+	}
 	vp = nd.ni_vp;
 	if (vp->v_type != VLNK)
 		error = EINVAL;
@@ -2173,6 +2176,7 @@ doreadlinkat(struct proc *p, int fd, const char *path, char *buf,
 		*retval = count - auio.uio_resid;
 	}
 	vput(vp);
+	KERNEL_UNLOCK();
 	return (error);
 }
 
