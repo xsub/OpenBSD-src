@@ -203,21 +203,27 @@ rw_lock_held(struct rwlock *rwl)
 
 
 void	_rrw_init_flags(struct rrwlock *, const char *, int,
-	    const struct lock_type *);
+	    const struct lock_type *, int);
 int	rrw_enter(struct rrwlock *, int);
 void	rrw_exit(struct rrwlock *);
 int	rrw_status(struct rrwlock *);
 
 #ifdef WITNESS
+#define rrw_init_flags_trace(rrwl, name, flags, trace) do {		\
+	static const struct lock_type __lock_type = { .lt_name = #rrwl };\
+	_rrw_init_flags(rrwl, name, flags, &__lock_type, trace);	\
+} while (0)
 #define rrw_init_flags(rrwl, name, flags) do {				\
 	static const struct lock_type __lock_type = { .lt_name = #rrwl };\
-	_rrw_init_flags(rrwl, name, flags, &__lock_type);		\
+	_rrw_init_flags(rrwl, name, flags, &__lock_type, 0);		\
 } while (0)
 #define rrw_init(rrwl, name)	rrw_init_flags(rrwl, name, 0)
 #else /* WITNESS */
+#define rrw_init_flags_trace(rrwl, name, flags, trace) \
+				_rrw_init_flags(rrwl, name, flags, NULL, trace)
 #define rrw_init_flags(rrwl, name, flags) \
-				_rrw_init_flags(rrwl, name, flags, NULL)
-#define rrw_init(rrwl, name)	_rrw_init_flags(rrwl, name, 0, NULL)
+				_rrw_init_flags(rrwl, name, flags, NULL, 0)
+#define rrw_init(rrwl, name)	_rrw_init_flags(rrwl, name, 0, NULL, 0)
 #endif /* WITNESS */
 
 
