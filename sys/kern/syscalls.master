@@ -213,7 +213,7 @@
 97	STD NOLOCK	{ int sys_socket(int domain, int type, int protocol); }
 98	STD NOLOCK	{ int sys_connect(int s, const struct sockaddr *name, \
 			    socklen_t namelen); }
-99	STD		{ int sys_getdents(int fd, void *buf, size_t buflen); }
+99	STD NOLOCK	{ int sys_getdents(int fd, void *buf, size_t buflen); }
 100	STD		{ int sys_getpriority(int which, id_t who); }
 101	STD NOLOCK	{ int sys_pipe2(int *fdp, int flags); }
 102	STD NOLOCK	{ int sys_dup3(int from, int to, int flags); }

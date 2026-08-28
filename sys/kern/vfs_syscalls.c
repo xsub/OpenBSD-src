@@ -3142,7 +3142,9 @@ sys_getdents(struct proc *p, void *v, register_t *retval)
 	auio.uio_procp = p;
 	auio.uio_resid = buflen;
 	auio.uio_offset = fp->f_offset;
+	KERNEL_LOCK();
 	error = VOP_READDIR(vp, &auio, fp->f_cred, &eofflag);
+	KERNEL_UNLOCK();
 	mtx_enter(&fp->f_mtx);
 	fp->f_offset = auio.uio_offset;
 	mtx_leave(&fp->f_mtx);

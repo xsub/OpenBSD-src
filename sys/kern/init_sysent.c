@@ -230,7 +230,7 @@ const struct sysent sysent[] = {
 	    sys_socket },			/* 97 = socket */
 	{ 3, s(struct sys_connect_args), SY_NOLOCK | 0,
 	    sys_connect },			/* 98 = connect */
-	{ 3, s(struct sys_getdents_args), 0,
+	{ 3, s(struct sys_getdents_args), SY_NOLOCK | 0,
 	    sys_getdents },			/* 99 = getdents */
 	{ 2, s(struct sys_getpriority_args), 0,
 	    sys_getpriority },			/* 100 = getpriority */
