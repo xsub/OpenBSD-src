@@ -348,9 +348,9 @@
 187	OBSOL		lfs_segwait
 188	OBSOL		stat35
 189	OBSOL		fstat35
-190	STD		{ long sys_pathconfat(int fd, const char *path, \
+190	STD NOLOCK	{ long sys_pathconfat(int fd, const char *path, \
 			    int name, int flag); }
-191	STD		{ long sys_pathconf(const char *path, int name); }
+191	STD NOLOCK	{ long sys_pathconf(const char *path, int name); }
 192	STD		{ long sys_fpathconf(int fd, int name); }
 193	STD		{ int sys_swapctl(int cmd, const void *arg, int misc); }
 194	STD NOLOCK	{ int sys_getrlimit(int which, \

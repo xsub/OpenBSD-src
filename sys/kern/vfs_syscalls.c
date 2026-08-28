@@ -2100,10 +2100,14 @@ dopathconfat(struct proc *p, int fd, const char *path, int name, int flag,
 	NDINITAT(&nd, LOOKUP, follow | LOCKLEAF, UIO_USERSPACE, fd, path, p);
 	nd.ni_pledge = PLEDGE_RPATH;
 	nd.ni_unveil = UNVEIL_READ;
-	if ((error = namei(&nd)) != 0)
+	KERNEL_LOCK();
+	if ((error = namei(&nd)) != 0) {
+		KERNEL_UNLOCK();
 		return (error);
+	}
 	error = VOP_PATHCONF(nd.ni_vp, name, retval);
 	vput(nd.ni_vp);
+	KERNEL_UNLOCK();
 	return (error);
 }
 

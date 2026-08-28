@@ -417,9 +417,9 @@ const struct sysent sysent[] = {
 	    sys_nosys },			/* 188 = obsolete stat35 */
 	{ 0, 0, 0,
 	    sys_nosys },			/* 189 = obsolete fstat35 */
-	{ 4, s(struct sys_pathconfat_args), 0,
+	{ 4, s(struct sys_pathconfat_args), SY_NOLOCK | 0,
 	    sys_pathconfat },			/* 190 = pathconfat */
-	{ 2, s(struct sys_pathconf_args), 0,
+	{ 2, s(struct sys_pathconf_args), SY_NOLOCK | 0,
 	    sys_pathconf },			/* 191 = pathconf */
 	{ 2, s(struct sys_fpathconf_args), 0,
 	    sys_fpathconf },			/* 192 = fpathconf */
