@@ -1,0 +1,43 @@
+/*
+ * Vnode lock acquisitions, broken down by how each one ended.
+ *
+ * Requires a kernel carrying the rwlock:vnode probe.  Without it btrace(8)
+ * reports the probe as unknown and exits.
+ *
+ * tracepoint:rwlock:vnode arguments:
+ *	arg0	lock address
+ *	arg1	1 = read, 2 = write, 3 = upgrade
+ *	arg2	1 = uncontended, 2 = after spinning or a retry,
+ *		3 = after sleeping, 4 = gave up with EBUSY or EINTR
+ *
+ * Recursive acquisitions by the current owner never reach rw_enter() and
+ * so are not counted here.  That is deliberate: they cannot contend.
+ *
+ * usage: btrace vnode-lock.bt
+ */
+
+tracepoint:rwlock:vnode
+{
+	@outcome[arg1, arg2] = count();
+
+	if (arg2 == 3) {
+		@slept_on_lock[arg0] = count();
+		@slept_in_proc[comm] = count();
+	}
+}
+
+END
+{
+	printf("outcome[kind, ending]: kind 1=read 2=write 3=upgrade, ");
+	printf("ending 1=free 2=spun 3=slept 4=failed\n");
+	print(@outcome);
+
+	printf("=> locks most often slept on:\n");
+	@top = 20;
+	print(@slept_on_lock, @top);
+
+	printf("=> processes that slept on a vnode lock:\n");
+	print(@slept_in_proc);
+
+	clear(@top);
+}

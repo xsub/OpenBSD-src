@@ -1,0 +1,33 @@
+/*
+ * Cost of a single pathname resolution.
+ *
+ * Requires a kernel built with "option DDBPROF" for the kprobe provider,
+ * which is amd64 and i386 only.  No other kernel change is needed: namei()
+ * is an ordinary global function.
+ *
+ * usage: btrace namei.bt
+ */
+
+kprobe:namei:entry
+{
+	@start[tid] = nsecs;
+}
+
+kprobe:namei:return
+/@start[tid]/
+{
+	@ns = hist(nsecs - @start[tid]);
+	@calls[comm] = count();
+	delete(@start[tid]);
+}
+
+END
+{
+	printf("=> namei() duration, ns:\n");
+	print(@ns);
+
+	printf("=> namei() calls per process:\n");
+	print(@calls);
+
+	clear(@start);
+}
