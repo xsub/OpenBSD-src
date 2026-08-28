@@ -595,11 +595,11 @@ rw_assert_unlocked(struct rwlock *rwl)
 /* recursive rwlocks; */
 void
 _rrw_init_flags(struct rrwlock *rrwl, const char *name, int flags,
-    const struct lock_type *type)
+    const struct lock_type *type, int trace)
 {
 	memset(rrwl, 0, sizeof(struct rrwlock));
 	_rw_init_flags_witness(&rrwl->rrwl_lock, name, RRWLOCK_LO_FLAGS(flags),
-	    type, 0);
+	    type, trace);
 }
 
 int
