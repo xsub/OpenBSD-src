@@ -1213,7 +1213,8 @@ retry:
 	vp->v_flag |= VLOCKSWORK;
 #endif
 	ip = pool_get(&ffs_ino_pool, PR_WAITOK|PR_ZERO);
-	rrw_init_flags(&ip->i_lock, "inode", RWL_DUPOK | RWL_IS_VNODE);
+	rrw_init_flags_trace(&ip->i_lock, "inode", RWL_DUPOK | RWL_IS_VNODE,
+	    DT_RWLOCK_IDX_VNODE);
 	ip->i_ump = ump;
 	vref(ip->i_devvp);
 	vp->v_data = ip;
