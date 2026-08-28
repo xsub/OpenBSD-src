@@ -99,7 +99,7 @@
 			    socklen_t *alen); }
 32	STD NOLOCK	{ int sys_getsockname(int fdes, struct sockaddr *asa, \
 			    socklen_t *alen); }
-33	STD		{ int sys_access(const char *path, int amode); }
+33	STD NOLOCK	{ int sys_access(const char *path, int amode); }
 34	STD		{ int sys_chflags(const char *path, u_int flags); }
 35	STD		{ int sys_fchflags(int fd, u_int flags); }
 36	STD		{ void sys_sync(void); }
@@ -540,7 +540,7 @@
 310	STD NOLOCK	{ int sys_setrtable(int rtableid); }
 311	STD NOLOCK	{ int sys_getrtable(void); }
 312	OBSOL		t32_getdirentries
-313	STD		{ int sys_faccessat(int fd, const char *path, \
+313	STD NOLOCK	{ int sys_faccessat(int fd, const char *path, \
 			    int amode, int flag); }
 314	STD		{ int sys_fchmodat(int fd, const char *path, \
 			    mode_t mode, int flag); }

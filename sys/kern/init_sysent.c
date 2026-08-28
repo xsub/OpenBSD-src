@@ -88,7 +88,7 @@ const struct sysent sysent[] = {
 	    sys_getpeername },			/* 31 = getpeername */
 	{ 3, s(struct sys_getsockname_args), SY_NOLOCK | 0,
 	    sys_getsockname },			/* 32 = getsockname */
-	{ 2, s(struct sys_access_args), 0,
+	{ 2, s(struct sys_access_args), SY_NOLOCK | 0,
 	    sys_access },			/* 33 = access */
 	{ 2, s(struct sys_chflags_args), 0,
 	    sys_chflags },			/* 34 = chflags */
@@ -715,7 +715,7 @@ const struct sysent sysent[] = {
 	    sys_getrtable },			/* 311 = getrtable */
 	{ 0, 0, 0,
 	    sys_nosys },			/* 312 = obsolete t32_getdirentries */
-	{ 4, s(struct sys_faccessat_args), 0,
+	{ 4, s(struct sys_faccessat_args), SY_NOLOCK | 0,
 	    sys_faccessat },			/* 313 = faccessat */
 	{ 4, s(struct sys_fchmodat_args), 0,
 	    sys_fchmodat },			/* 314 = fchmodat */

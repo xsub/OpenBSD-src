@@ -1959,8 +1959,11 @@ dofaccessat(struct proc *p, int fd, const char *path, int amode, int flag)
 	}
 	if (amode & X_OK)
 		vflags |= VEXEC;
-	if ((error = namei(&nd)) != 0)
+	KERNEL_LOCK();
+	if ((error = namei(&nd)) != 0) {
+		KERNEL_UNLOCK();
 		goto out;
+	}
 	vp = nd.ni_vp;
 
 	/* Flags == 0 means only check for existence. */
@@ -1970,6 +1973,7 @@ dofaccessat(struct proc *p, int fd, const char *path, int amode, int flag)
 			error = vn_writechk(vp);
 	}
 	vput(vp);
+	KERNEL_UNLOCK();
 out:
 	if (newcred != NULL) {
 		p->p_ucred = oldcred;
